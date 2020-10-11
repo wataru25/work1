@@ -1,0 +1,135 @@
+Sub yieldshaping()
+
+
+Dim yieldExcel As Workbook
+
+'ワークブックを開く
+Set yieldExcel = Workbooks.Open(Range("C15").Value)
+
+'金利のコピーアンドペースト
+Application.DisplayAlerts = False
+With yieldExcel
+rowNumber = Application.WorksheetFunction.Match(ThisWorkbook.Worksheets("yield_and_IV").Range("E2"), .Worksheets("Bloomberg").Range("A21:AA21"), 0)
+.Worksheets("Bloomberg").Range(.Worksheets("Bloomberg").Cells(22, 7), .Worksheets("Bloomberg").Cells(176, 7)).Copy
+.Worksheets("金利まとめ").Range("E4:E157").PasteSpecial (xlPasteValues)
+End With
+Application.DisplayAlerts = True
+
+'ワークブックを保存して閉じる
+yieldExcel.Save
+Call yieldExcel.Close
+
+
+End Sub
+
+Sub usedata()
+
+Dim yieldExcel As Workbook
+Dim usedataExcel As Workbook
+
+'ワークブックを開く
+Set usedataExcel = Workbooks.Open(Range("C16").Value)
+Set yieldExcel = Workbooks.Open(Range("C15").Value)
+
+Application.DisplayAlerts = False
+
+With usedataExcel.Worksheets("売買参考統計値銘柄データ")
+'売買参考統計値の削除
+MaxRow = .Range("A5").End(xlDown).Row
+MaxCol = .Range("A5").End(xlToRight).Column
+.Range(.Cells(5, 1), .Cells(MaxRow, MaxCol)).Clear
+End With
+
+With ThisWorkbook.Worksheets("売買参考統計値")
+'売買参考統計値の入力
+MaxRow = .Range("A4").End(xlDown).Row
+MaxCol = .Range("A4").End(xlToRight).Column
+.Range(.Cells(4, 1), .Cells(MaxRow, MaxCol)).Copy
+End With
+usedataExcel.Worksheets("売買参考統計値銘柄データ").Range("A5").PasteSpecial (xlPasteValues)
+
+With usedataExcel
+.Worksheets("国債クーポン率の計算").Range("B5") = ThisWorkbook.Worksheets("yield_and_IV").Range("date")
+.Worksheets("金利データ").Range("D4") = ThisWorkbook.Worksheets("yield_and_IV").Range("date")
+yieldExcel.Worksheets("金利まとめ").Range("E4:E50").Copy
+.Worksheets("金利データ").Range("D5").PasteSpecial (xlPasteValues)
+End With
+
+
+Application.DisplayAlerts = True
+
+'使用データの保存
+usedataExcel.Save
+Call usedataExcel.Close
+Call yieldExcel.Close
+
+End Sub
+
+Sub yieldinterpolate()
+
+Dim yieldExcel As Workbook
+Dim usedataExcel As Workbook
+Dim yieldInterpolateExcel As Workbook
+Dim c As Range, Target As String
+
+
+'ワークブックを開く
+Set usedataExcel = Workbooks.Open(Range("C16").Value)
+Set yieldExcel = Workbooks.Open(Range("C15").Value)
+Set yieldInterpolateExcel = Workbooks.Open(Range("C17").Value)
+
+Application.DisplayAlerts = False
+
+
+'JGB、クーポン、JPYのイールドを入力
+usedataExcel.Worksheets("金利データ").Range("G4:I66").Copy
+yieldInterpolateExcel.Worksheets("市場データ").Range("C4").PasteSpecial (xlPasteValues)
+'その他の金利を入力
+yieldExcel.Worksheets("金利まとめ").Range("J3:M65").Copy
+yieldInterpolateExcel.Worksheets("市場データ").Range("F4").PasteSpecial (xlPasteValues)
+'WTWと照らし合わせてWTWと使用していないデータは削除（後ほど追記）
+'空欄のセルを削除
+For Each c In yieldInterpolateExcel.Worksheets("市場データ").Range("C4:J66")
+    If c.Value = "" Then
+        Target = Target & c.Address & ","
+    End If
+Next c
+If Right(Target, 1) = "," Then Target = Left(Target, Len(Target) - 1)
+yieldInterpolateExcel.Worksheets("市場データ").Range(Target).Select.Delete
+
+Application.Run "'" & ThisWorkbook.Worksheets("計算実行").Range("C17").Value & "'!kkkk"
+
+yieldInterpolateExcel.Save
+Call usedataExcel.Close
+Call yieldExcel.Close
+Call yieldInterpolateExcel.Close
+
+End Sub
+
+
+Sub yieldextrapolate()
+
+Dim yieldInterpolateExcel As Workbook
+Dim yieldExtrapolateExcel As Workbook
+
+'ワークブックを開く
+Set yieldInterpolateExcel = Workbooks.Open(Range("C17").Value)
+Set yieldExtrapolateExcel = Workbooks.Open(Range("C19").Value)
+
+'補外に関する設定を入力
+
+
+'イールドの入力
+yieldInterpolateExcel.Worksheets("アウトプット").Range("D5:H205").Copy
+yieldExtrapolateExcel.Worksheets("Yield").Range("E26").PasteSpecial (xlPasteValues)
+yieldInterpolateExcel.Worksheets("アウトプット").Range("J5:J205").Copy
+yieldExtrapolateExcel.Worksheets("Yield").Range("J26").PasteSpecial (xlPasteValues)
+
+Application.Run "'" & ThisWorkbook.Worksheets("計算実行").Range("C19").Value & "'!kkkk"
+
+yieldExtrapolateExcel.Save
+Call yieldInterpolateExcel.Close
+Call yieldExtrapolateExcel.Close
+
+
+End Sub
