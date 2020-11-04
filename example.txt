@@ -1,0 +1,195 @@
+Sub SwaptionIV()
+
+Dim SwaptionIVExcel As Workbook
+Dim EVDate As Date: EVDate = Worksheets("yield_and_IV").Range("EVDate")
+Dim lastCell As Range
+Dim colNumber As Long
+
+
+'ワークブックを開く
+Set SwaptionIVExcel = Workbooks.Open(Range("C21").Value)
+Application.DisplayAlerts = False
+
+'JPY
+SwaptionIVExcel.Worksheets("Data").Range("D3:HE3").Clear
+With SwaptionIVExcel.Worksheets("JPYIV")
+Set lastCell = .Cells(Rows.Count, 4).End(xlUp)
+colNumber = Application.WorksheetFunction.Match(CDbl(EVDate), .Range(.Cells(11, 4), .Cells(lastCell.Row, 4)), 0)
+.Range(.Cells(colNumber + 10, 5), .Cells(colNumber + 10, Columns.Count).End(xlToLeft)).Copy
+End With
+
+With SwaptionIVExcel.Worksheets("Data")
+.Range("D3").PasteSpecial (xlPasteValues)
+
+For Each i In .Range("D3:HE3")
+If i.Value = "#N/A N/A" Then
+i.Value = 0
+End If
+Next i
+
+.Range("D9:Q23").Copy
+.Range("D30").PasteSpecial (xlPasteValues)
+
+End With
+
+'USD
+SwaptionIVExcel.Worksheets("Data").Range("D3:HE3").Clear
+With SwaptionIVExcel.Worksheets("USDIV")
+Set lastCell = .Cells(Rows.Count, 4).End(xlUp)
+colNumber = Application.WorksheetFunction.Match(CDbl(EVDate), .Range(.Cells(11, 4), .Cells(lastCell.Row, 4)), 0)
+.Range(.Cells(colNumber + 10, 5), .Cells(colNumber + 10, Columns.Count).End(xlToLeft)).Copy
+End With
+
+With SwaptionIVExcel.Worksheets("Data")
+.Range("D3").PasteSpecial (xlPasteValues)
+
+For Each i In .Range("D3:HE3")
+If i.Value = "#N/A N/A" Then
+i.Value = 0
+End If
+Next i
+
+.Range("D9:Q23").Copy
+.Range("T30").PasteSpecial (xlPasteValues)
+
+End With
+
+'EUR
+SwaptionIVExcel.Worksheets("Data").Range("D3:HE3").Clear
+With SwaptionIVExcel.Worksheets("EURIV")
+Set lastCell = .Cells(Rows.Count, 4).End(xlUp)
+colNumber = Application.WorksheetFunction.Match(CDbl(EVDate), .Range(.Cells(11, 4), .Cells(lastCell.Row, 4)), 0)
+.Range(.Cells(colNumber + 10, 5), .Cells(colNumber + 10, Columns.Count).End(xlToLeft)).Copy
+End With
+
+With SwaptionIVExcel.Worksheets("Data")
+.Range("D3").PasteSpecial (xlPasteValues)
+
+For Each i In .Range("D3:HE3")
+If i.Value = "#N/A N/A" Then
+i.Value = 0
+End If
+Next i
+
+.Range("D9:Q23").Copy
+.Range("D50").PasteSpecial (xlPasteValues)
+
+End With
+
+'AUD
+SwaptionIVExcel.Worksheets("Data").Range("D3:HE3").Clear
+With SwaptionIVExcel.Worksheets("AUDIV")
+Set lastCell = .Cells(Rows.Count, 4).End(xlUp)
+colNumber = Application.WorksheetFunction.Match(CDbl(EVDate), .Range(.Cells(11, 4), .Cells(lastCell.Row, 4)), 0)
+.Range(.Cells(colNumber + 10, 5), .Cells(colNumber + 10, Columns.Count).End(xlToLeft)).Copy
+End With
+
+With SwaptionIVExcel.Worksheets("Data")
+.Range("D3").PasteSpecial (xlPasteValues)
+
+For Each i In .Range("D3:HE3")
+If i.Value = "#N/A N/A" Then
+i.Value = 0
+End If
+Next i
+
+.Range("D9:Q23").Copy
+.Range("T50").PasteSpecial (xlPasteValues)
+
+End With
+
+SwaptionIVExcel.Save
+Call SwaptionIVExcel.Close
+
+
+Application.DisplayAlerts = True
+
+
+End Sub
+
+Sub ESGCalibration()
+
+Dim ESGCalibration As Workbook
+Dim CEscenario As Workbook
+Dim SwaptionIV As Workbook
+Dim FXShare As Workbook
+
+
+'ワークブックを開く
+Set ESGCalibration = Workbooks.Open(Range("C22").Value)
+Application.DisplayAlerts = False
+
+'Yieldシートの入力
+Set CEscenario = Workbooks.Open(Range("C19").Value)
+CEscenario.Worksheets("Input").Range("D5:G205").Copy
+ESGCalibration.Worksheets("Yield").Range("D6").PasteSpecial (xlPasteValues)
+CEscenario.Worksheets("Input").Range("I5:I205").Copy
+ESGCalibration.Worksheets("Yield").Range("H6").PasteSpecial (xlPasteValues)
+Call CEscenario.Close
+
+'HVシートの入力
+ThisWorkbook.Worksheets("Calibration_input1").Range("D4:D7").Copy
+ESGCalibration.Worksheets("HV").Range("C3").PasteSpecial (xlPasteValues)
+
+'Correlationシート入力
+ThisWorkbook.Sheets("Calibration_input1").Range("D11:S26").Copy
+ESGCalibration.Worksheets("Correlation").Range("C4").PasteSpecial (xlPasteValues)
+
+'SwaptionWeightシートの入力
+ThisWorkbook.Sheets("Calibration_input2").Range("E5:R19").Copy
+ESGCalibration.Worksheets("SwaptionWeight").Range("D8").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input2").Range("E24:R38").Copy
+ESGCalibration.Worksheets("SwaptionWeight").Range("D27").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input2").Range("E44:R58").Copy
+ESGCalibration.Worksheets("SwaptionWeight").Range("D47").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input2").Range("E63:R77").Copy
+ESGCalibration.Worksheets("SwaptionWeight").Range("D66").PasteSpecial (xlPasteValues)
+
+
+'【IV】Swaptionシート入力
+Set SwaptionIV = Workbooks.Open(Range("C21").Value)
+SwaptionIV.Worksheets("Data").Range("D30:Q44").Copy
+ESGCalibration.Worksheets("【IV】Swaption").Range("D9").PasteSpecial (xlPasteValues)
+SwaptionIV.Worksheets("Data").Range("T30:AG44").Copy
+ESGCalibration.Worksheets("【IV】Swaption").Range("D29").PasteSpecial (xlPasteValues)
+SwaptionIV.Worksheets("Data").Range("D50:Q64").Copy
+ESGCalibration.Worksheets("【IV】Swaption").Range("D50").PasteSpecial (xlPasteValues)
+SwaptionIV.Worksheets("Data").Range("T50:AG64").Copy
+ESGCalibration.Worksheets("【IV】Swaption").Range("D70").PasteSpecial (xlPasteValues)
+Call SwaptionIV.Close
+
+'【IV】FX&Equity
+Set FXShare = Workbooks.Open(Range("C20").Value)
+FXShare.Worksheets("Output").Range("D5:D7").Copy
+ESGCalibration.Worksheets("【IV】FX&Equity").Range("E7").PasteSpecial (xlPasteValues)
+FXShare.Worksheets("Output").Range("D11:J25").Copy
+ESGCalibration.Worksheets("【IV】FX&Equity").Range("D14").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input1").Range("E31:F32").Copy
+ESGCalibration.Worksheets("【IV】FX&Equity").Range("D32").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input1").Range("D36:E38").Copy
+ESGCalibration.Worksheets("【IV】FX&Equity").Range("D37").PasteSpecial (xlPasteValues)
+Call FXShare.Close
+
+'【Params】JPYHWシート
+ThisWorkbook.Sheets("Calibration_input1").Range("I30:I34").Copy
+ESGCalibration.Worksheets("【Params】JPYHW").Range("C5").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input1").Range("N30:N41").Copy
+ESGCalibration.Worksheets("【Params】JPYHW").Range("D16").PasteSpecial (xlPasteValues)
+
+'【Params】FRGNHW
+ThisWorkbook.Sheets("Calibration_input1").Range("T31:U33").Copy
+ESGCalibration.Worksheets("【Params】FRGNHW").Range("C5").PasteSpecial (xlPasteValues)
+
+'【Params】FX&Equity
+ThisWorkbook.Sheets("Calibration_input1").Range("T37:T39").Copy
+ESGCalibration.Worksheets("【Params】FX&Equity").Range("C8").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input1").Range("D45:J47").Copy
+ESGCalibration.Worksheets("【Params】FX&Equity").Range("C14").PasteSpecial (xlPasteValues)
+ThisWorkbook.Sheets("Calibration_input1").Range("D51:J56").Copy
+ESGCalibration.Worksheets("【Params】FX&Equity").Range("C20").PasteSpecial (xlPasteValues)
+
+
+Application.DisplayAlerts = True
+
+
+End Sub
