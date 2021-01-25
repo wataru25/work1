@@ -1,0 +1,285 @@
+#パッケージのインポート
+import pandas as pd
+import math
+import scipy
+from scipy.stats import norm
+from scipy.stats import lognorm
+from scipy.stats import t
+from scipy.special import kv
+from scipy.special import kve
+from scipy import optimize
+import numpy as np
+import optuna
+import datetime as dt
+
+#%% インプット
+
+#日経平均株価のデータのパス
+input_data_path = "C:/Users/ai199/Desktop/wataru/07_年末年始の作業/運企予兆/Nikkei225.csv"
+
+#訓練期間の設定
+start_train = "2021/1/4"
+end_train = "2021/1/8"
+
+# 訓練データとして使用する時点数（現時点より前で何時点を推定のデータとして使用するか）
+use_past_data = 10
+# optunaの乱数シード数
+seed_num = 700
+# optunaでハイパラを探す回数
+n_trials = 100
+
+#%% データの用意
+
+# データの読み込み(日次の日経平均株価)
+all_data = pd.read_csv(input_data_path,encoding = "shift-jis",index_col=0)
+# 訓練データの設定（株価）
+train_data = all_data.loc[start_train:end_train]
+#株価をリターンに変換
+all_return_weekly = all_data.pct_change(4).dropna()
+#使用する期間指定
+train_data_return = all_return_weekly.loc[start_train:end_train]
+
+#%% GH分布及びDLN分布に関する定義
+
+#GH分布の定義
+def GH_dist(x,params,exp_factor = 1):
+    """
+    parameters
+    ----------
+    x : float
+        株式のリターン
+    params : list
+        GH分布のパラメータ(（λ,α,β,δ,μ）
+
+    Returns
+    -------
+    float
+        GH分布の密度関数
+    """
+    lam = params[0]
+    alpha = params[1]
+    beta = params[2]
+    delta = params[3]
+    mu = params[4]
+    
+    gamma = (alpha**2-beta**2)**(1/2)
+    y = alpha*((delta**2+(x-mu)**2))**(1/2)
+    bx = beta*(x-mu)
+    
+    if delta*gamma > 700:
+        expTerm = math.exp(delta*gamma-y+exp_factor*bx)
+        besselRatio = kve(lam-1/2,y)/kve(lam,delta*gamma)
+        expAndBessel = expTerm*besselRatio
+        
+    else :  
+        if (y>700) or (bx>700) :
+            expAndBessel = math.exp(delta*gamma - y + exp_factor*bx)*kv(lam-1/2,y)/kv(lam,delta*gamma)
+        else :
+            if kv(lam-1/2,y)/kv(lam,delta*gamma) == float("inf"):
+                if lam<0:
+                    besselRatio = -math.tan(lam*math.pi)*((2*y)**(1/2))*((delta*gamma/y)**lam)*(scipy.special.gamma(lam+1)/scipy.special.gamma(lam+1/2))
+                if 0<= lam < 1/2:
+                    besselRatio = math.tan(lam*math.pi)*((y/2)**(1/2))*((delta*gamma*y)**(-lam))*(4**lam)*(scipy.special.gamma(-lam+1)/scipy.special.gamma(lam+1/2))
+                if lam >= 1/2 :
+                    besselRatio = -math.tan(lam*math.pi)*((2/y)**(1/2))*((y/(delta*gamma))**(-lam))*(scipy.special.gamma(-lam+1)/scipy.special.gamma(-lam+1/2))
+            else:
+                besselRatio = (kv(lam-1/2,y)/kv(lam,delta*gamma))
+            
+            expAndBessel = math.exp(exp_factor*bx)*besselRatio
+    dens = (y/alpha)**(lam-1/2)*((gamma/delta)**lam)*expAndBessel*(alpha**(1/2-lam))/((2*math.pi)**(1/2))
+        
+    return dens
+
+#GH分布の対数尤度
+def likelihood_GH(params,data_list,exp_factor = 1):
+    
+    alpha = float(params[1])
+    beta = float(params[2])
+        
+    if alpha > abs(beta):       
+        try:
+            likelihood = 0 #尤度の初期値
+            for i in np.arange(len(data_list)):
+                # model output 
+                p = GH_dist(data_list[i],params,exp_factor = exp_factor)
+                # likelihood 尤度
+                likelihood += -np.log(p)#尤度
+
+            return likelihood
+        
+        except OverflowError:
+            return float("inf")
+            
+    else :
+        return float("inf")
+
+#DLN分布の定義
+def DLN_dist(x,params):
+    mu1 = params[0]
+    sigma1 = params[1]
+    scale1 = params[2]
+    mu2 = params[3]
+    sigma2 = params[4]
+    scale2 = params[5]
+    omega = params[6]
+    
+    first_term = lognorm.pdf(x,sigma1,mu1,scale1)
+    second_term = lognorm.pdf(x,sigma2,mu2,scale2)
+    
+    return first_term*omega+second_term*(1-omega)
+        
+def likelihood_DLN(params,data_list):
+    likelihood = 0 #尤度の初期値
+    for i in np.arange(len(data_list)):
+        # model output 
+        p = DLN_dist(data_list[i],params)
+        # likelihood 尤度
+        likelihood += -np.log(p)#尤度
+
+        return likelihood
+
+#%%分布推定を実行する関数の定義
+
+
+def dist_estimate(start_train,end_train,RetOrPri):
+    #結果保存用
+    global norm_result
+    global t_result
+    global lognorm_result
+    global GH_result
+    global DLN_result
+    global all_result
+    global converge_result
+    
+    #使用するデータの準備
+    if RetOrPri == "price":
+        train_data = train_data_return
+    elif RetOrPri == "return":
+        #株価をリターンに変換
+        all_return_weekly = all_data.pct_change(4).dropna()
+        #使用する期間指定
+        try:
+            train_data = all_return_weekly.loc[start_train:end_train]
+        except KeyError:
+            return None
+    else:
+        raise Exception("returnまたはpriceを入れてください")
+    
+    
+    #分布推定1(株価自体の分布について)
+    # 正規分布（最尤推定）
+    mu,sigma = norm.fit(list(train_data["price"]))
+    norm_result = {"mu":mu,"sigma":sigma}
+                   
+    # t分布（最尤推定）
+    nu, loc, scale = t_result = list(t.fit(list(train_data["price"])))
+    t_result = {"nu":nu,"loc":loc,"scale":scale}
+    
+    # 対数正規分布（最尤推定）
+    sigma,loc,scale = lognorm_result = list(lognorm.fit(list(train_data["price"])))
+    lognorm_result = {"sigma":sigma,"loc":loc,"scale":scale}
+    
+    
+    #分布推定1(株価のGH分布．optunaによる初期値の決定）
+    def objective(trial):
+        # 最適化するパラメータを設定
+        if RetOrPri == "price":
+        
+            params = {
+                'lam': trial.suggest_uniform('lam', -100, 100),
+                'alpha': trial.suggest_loguniform('alpha',0.0001, 100),
+                'beta': trial.suggest_loguniform('beta', 0.0001, 100),
+                'delta': trial.suggest_loguniform('delta', 0.0001, 100),
+                'mu': trial.suggest_uniform('mu', 10000, 30000)
+            }
+        
+        else :
+            params = {
+                'lam': trial.suggest_uniform('lam', -50, 50),
+                'alpha': trial.suggest_loguniform('alpha',0.001, 50),
+                'beta': trial.suggest_loguniform('beta', 0.001, 50),
+                'delta': trial.suggest_loguniform('delta', 0.001, 50),
+                'mu': trial.suggest_uniform('mu', -1, 1)
+            }
+        
+        exp_factor = trial.suggest_categorical('exp_factor', choices=[-1,1])
+        params = [params["lam"],params["alpha"],params["beta"],params["delta"],params["mu"]]
+        
+        return likelihood_GH(params,list(train_data["price"]),exp_factor = exp_factor)
+    
+    study = optuna.create_study(sampler = optuna.samplers.TPESampler(seed = seed_num),direction = "minimize")
+    study.optimize(objective,n_trials = n_trials)
+    best_params = study.best_trial.params
+    
+    #分布推定1(株価のGH分布．scipyの最尤推定)
+    #パラメータの初期値を設定
+    init_parameter = [best_params["lam"],best_params["alpha"],best_params["exp_factor"]*best_params["beta"],best_params["delta"],best_params["mu"]]
+    #尤度の最大化
+    optimized_GH = optimize.minimize(likelihood_GH,init_parameter,method = "Nelder-Mead",args=(list(train_data["price"])),options={'maxiter': 30000})
+    lam,alpha,beta,gamma,mu = optimized_GH["x"]
+    GH_result = {"lam":lam,"alpha":alpha,"beta":beta,"gamma":gamma,"mu":mu}
+    
+    #分布推定（株価のDLN分布.optunaによる初期値の決定）
+    def objective(trial):
+        # 最適化するパラメータを設定
+        params = {
+            'mu1':trial.suggest_uniform('mu1', -10*abs(loc),10*abs(loc)),
+            'sigma1': trial.suggest_uniform('sigma1',0, 10*abs(sigma)),
+            'scale1': trial.suggest_uniform('scale1',0, 10*abs(scale)),
+            'mu2': trial.suggest_uniform('mu2',-10*abs(loc),10*abs(loc)),
+            'sigma2': trial.suggest_uniform('sigma2', 0, 10*abs(sigma)),
+            'scale2': trial.suggest_uniform('scale2',0, 10*abs(scale)),
+            'omega': trial.suggest_uniform('omega', 0, 1)
+        }
+        
+        params = [params["mu1"],params["sigma1"],params["scale1"],params["mu2"],params["sigma2"],params["scale2"],params["omega"]]
+        
+        return likelihood_DLN(params,list(train_data["price"]))
+    
+    study = optuna.create_study(sampler = optuna.samplers.TPESampler(seed = seed_num),direction = "minimize")
+    study.optimize(objective,n_trials = n_trials)
+    best_params = study.best_trial.params
+    
+    
+    #分布推定1(株価のDLN分布．scipyの最尤推定)
+    #パラメータの初期値を設定
+    init_parameter = [best_params["mu1"],best_params["sigma1"],best_params["scale1"],best_params["mu2"],best_params["sigma2"],best_params["scale2"],best_params["omega"]]
+    #尤度の最大化
+    optimized_DLN = optimize.minimize(likelihood_DLN,init_parameter,method = "Nelder-Mead",args=(list(train_data["price"])),options={'maxiter': 30000})
+    mu1,sigma1,scale1,mu2,sigma2,scale2,omega = optimized_DLN["x"]
+    DLN_result = {"mu1":mu1,"sigma1":sigma1,"scale1":scale1,"mu2":mu1,"sigma2":sigma1,"scale2":scale1,"omega":omega}
+    
+    all_result = {"正規分布":norm_result,"t分布":t_result,"対数正規分布":lognorm_result,"GH分布":GH_result,"DLN":DLN_result}
+    converge_result ={"GH分布":optimized_GH["success"],"DLN分布":optimized_DLN["success"]}
+    
+#%% パラメータ時系列の生成(日付の用意
+
+#月曜日から金曜日までの株価の終値を使用してパラメータを推定
+
+#使用するデータから金曜日の日付を取得
+fridays = []
+for i in list(all_data.index):
+    datetime_value = dt.datetime.strptime(i,"%Y/%m/%d")
+    print(datetime_value.strftime('%A'))
+    if datetime_value.strftime('%A') == "Friday":
+        fridays.append(i)
+#%%）時系列の推定
+#株価の分布推定結果
+price_estimate_result = {}
+price_estimate_convergre = {}
+#株価リターンの分布推定結果
+return_estimate_result = {}
+return_estimate_convergre = {}
+
+for i in range(1,len(fridays)):
+    start_train = all_data.index[list(all_data.index).index(fridays[i-1])+1]
+    end_train = fridays[i]
+    print("c")
+    dist_estimate(start_train,end_train,"price")
+    price_estimate_result[end_train]=all_result
+    price_estimate_convergre[end_train] = converge_result
+    
+    dist_estimate(start_train,end_train,"return")
+    return_estimate_result[end_train]=all_result
+    return_estimate_convergre[end_train] = converge_result
+
