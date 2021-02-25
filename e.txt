@@ -1,0 +1,17 @@
+import itertools
+import csv
+import pandas
+
+
+file_path = "C:/Users/ai199/Desktop/wataru/07_年末年始の作業/almプログラム/相関係数\【組み合わせ】元データ.csv"
+out_path = "C:/Users/ai199/Desktop/wataru/07_年末年始の作業/almプログラム/相関係数\【組み合わせ】output.csv"
+
+data = list(pd.read_csv(file_path,encoding = "shift-jis"))
+
+hozon = []
+for team in itertools.combinations(data, 3):
+    hozon.append(team)
+    
+with open(out_path,"w",encoding = "shift-jis") as f:
+    writer = csv.writer(f, lineterminator="\n") # writerオブジェクトの作成 改行記号で行を区切る
+    writer.writerows(hozon) # csvファイルに書き込み
