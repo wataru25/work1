@@ -1,0 +1,32 @@
+# -*- coding: utf-8 -*-
+
+import glob
+import zipfile
+import pandas as pd
+
+#%% データの読み込み
+
+folder = "C:/Users/ai199/Desktop/wataru/07_年末年始の作業/運企予兆/prob"
+ziplist = glob.glob(folder + "/*.zip")
+
+for zipname in ziplist:
+    filename = zipname.replace(folder,"").replace(".zip","")
+    with zipfile.ZipFile(zipname) as existing_zip:
+        existing_zip.extractall(folder + "/解凍後/" + filename)
+
+#%% データの収集
+
+predfilelist = glob.glob(folder + "/解凍後/" + "**/prediction.csv",recursive=True)
+
+sammary = pd.DataFrame()
+
+for filenum in range(len(predfilelist)):
+    dataname = ziplist[filenum].replace(folder+"\\","").replace(".zip","")
+    alldata = pd.read_csv(predfilelist[filenum])
+    sammary[dataname] = alldata["y_pred"]
+    
+sammary.index = alldata["Date"]
+sammary.to_csv(folder + "/params.csv")
+
+#%% データの保存
+
