@@ -1,0 +1,77 @@
+###シミュレーション用プログラム
+
+##初期値
+R0 = 100
+r0 = beta_r
+A0 = B0 = L0 = c0 = 1
+h = 10
+age = 25
+T = 65 - age
+alpha = 0
+delta = 2.5
+rho = beta_r
+
+##シミュレーション設定
+N = 100 #number of paths
+horizon = 60 #number of periods (years)
+dt = 1/4 #subperiods (quarters)
+
+#ウィーナー過程の設定
+dW_A = dW_r = dW_l = array(rnorm(horizon/dt * N, mean = 0,
+                                   sd = sqrt (dt)), dim = c(horizon/dt, N))
+#初期状態の設定
+R = array (NA, dim = c(horizon/dt, N, 2))
+R[1, , ] = R0
+l = array (NA, dim = c(horizon/dt, N, 2))
+
+l[1, , 1] = l0[1]
+l[1, , 2] = l0[2]
+r = array(NA, dim = c(horizon/dt, N))
+r[1, ] = r0
+co = array(NA, dim = c(horizon/dt, N))
+co[1, ] = c0
+
+wA = wB = wL = array(NA, dim = c(horizon/dt - 1, N,2))
+RN = DN = HN = array(NA, dim = c(horizon/dt - 1, N,2))
+C_r = C(0, h, alpha_r + k_r * sigma_r, sigma_r, 1)
+C_l = C(0, h, alpha_l + k_l * sigma_l, sigma_l, 1)
+
+for (i in 1:(horizon/dt - 1)){
+  t = i * dt #transform the counter (days) in years
+  for (sex in 1:2) {
+    HN[i, , sex] = mapply(H, t, r[i, ], l[i, ,sex] , sex)
+    DN[i, , sex] = mapply(PMR, t, T, co[i, ], r[i, ], l[i, , sex], sex)
+    RN[i, , sex] = R[i, , sex] - alpha * HN[i, , sex] - DN [i, , sex]
+    wA[i, , sex] = RN[i, , sex] * xi_A/(delta *sigma_A) + co[i, ] * sigma_cA/sigma_A *
+                   mapply(dDelta_dc, t, T, r[i, ], l[i, ,sex] , co[i, ], sex)
+    
+    wL[i, , sex] = -RN[i, , sex]/C_l[sex] * (k_l/ (delta *sigma_l[sex]) +
+                   mapply(dF_dl, t, r[i, ],l[i, , sex], sex)/mapply(F, t, r[i, ],l[i, , sex], sex))-
+                   (alpha * mapply (dH_dl,t, r[i, ], l[i, , sex], sex) + mapply(dDelta_dl,t, T, co[i, ], r[i, ], l[i, , sex], sex))/C_l[sex]
+   
+    wB[i, , sex] = RN[i, , sex]/C_r * ((sigma_Ar *xi_A/sigma_r/sigma_A - k_r/sigma_r) /delta -
+                   mapply(dF_dr, t, r[i, ], l[i, , sex], sex)/mapply (F,t, r[i, ], l[i, , sex] , sex))-
+                   (alpha *mapply(dH_dr, t, r[i, ], l[i, , sex], sex) +
+                   mapply(dDelta_dr, t, T, co[i, ], r[i, ],l[i, , sex] , sex) - co[i, ] * (sigma_Ar *
+                   sigma_cA/sigma_r/sigma_A - sigma_cr/sigma_r) *
+                   mapply(dDelta_dc, t, T, r[i, ], l[i, ,sex], co[i, ], sex))/C_r - wL[i, ,sex ]
+    
+    l[i + 1, , sex] = l[i, , sex] + alpha_l[sex]*(phi_l[sex] + (1/alpha_l[sex]/b_l[sex] +1)/b_l[sex] *
+                      exp((age + t - m_l[sex] )/b_l[sex]) -
+                      l[i, , sex] ) * dt + sigma_l[sex]*sqrt (l[i, , sex]) * dW_l[i, ]
+
+    r[i + 1, ] = r[i, ] + alpha_r * (beta_r - r[i,]) * dt + sigma_r * sqrt(r[i, ]) * dW_r[i, ]
+    #r[i + 1, ][which(r[i + 1, ]<0)] =0
+    
+    co[i + 1, ] = co[i, ] + co[i, ]*(mu_c * dt +sigma_cr * sqrt(r[i, ]) * dW_r[i, ] + sigma_cA *dW_A [i, ])
+    R[i + 1, , sex] = R[i, , sex] + (R[i, , sex]*r[i, ] + wA[i, , sex] * (mu_A - r[i, ])+
+                      wB[i, , sex] * (-C_r * sigma_r * k_r*r[i, ])+
+                      wL[i, , sex] * (-C_r * sigma_r *k_r * r[i, ] + (1 - C_l[sex] *
+                      sigma_l[sex]*k_l) * l[i, , sex]) - (p[sex] * as.numeric(t >=T)-
+                      co[i, ] * as.numeric(t < T))) * dt +wA[i, , sex] * sigma_A * dW_A[i, ] + 
+                      (wA[i, , sex] * sigma_Ar * sqrt(r[i, ]) + wB[i, , sex] * (-C_r * sigma_r * sqrt(r[i, ])) +
+                      wL[i, , sex] * (-C_r * sigma_r * sqrt(r[i, ])))* dW_r[i, ] + wL[i, , sex] * (-C_l[sex] *
+                      sigma_l[sex] * sqrt(l[i, , sex])) * dW_l[i, ]
+  }
+ print (i)
+}
