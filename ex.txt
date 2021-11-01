@@ -1,0 +1,132 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Oct 25 10:12:57 2021
+
+@author: finst
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import csv
+from statistics import mean, variance
+from scipy import stats
+import pandas as pd
+
+
+#==============================================================================
+# データの準備
+#==============================================================================
+# データのディレクトリの指定
+data_path = ""
+# 作業ディレクトリの指定
+main_path = ""
+# 正常なデータの読み込み
+data = []
+
+all_data = pd.read_csv("C:/Users/finst/OneDrive/デスクトップ/wataru/13_仕事/運企予兆/test/data.csv",index_col=0)
+
+
+#==============================================================================
+# 関数定義
+#==============================================================================
+# 火照リング
+
+# 近傍法
+
+def distance(data1,data2,kind):
+    """
+    Parameters
+    ----------
+    data1 : pandas dataframe
+    data2 : pandas dataframe
+    kind  : string
+        距離の種類を選択
+    
+    Returns
+    -------
+    Real number
+    data1とdata2の距離を測定
+    
+    """
+    if kind ="E":
+        distance = sum((data1-data2)**2)
+    elif kind = "m":
+        distance = sum((data1-data2).abs())
+    elif kind ="c":
+        distance = max((data1-data2).abs())
+    
+    return distance
+        
+def kNN(train_data,judged_data,th_num,th_dis,kind):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    juded_data : pandas dataframe
+        判定するデータ
+    threshold : real
+        距離の閾値
+    kind : string
+        距離の種類
+
+    Returns
+    -------
+    bool
+        Trueならば異常値，Falseならば正常値
+    """
+    
+    count = 0
+    
+    for i in len(train_data):
+        data = train_data.loc[i,:]
+        distance = distance(data,judged_data,kind)
+        if distance < th_dis:
+            count = count + 1
+            if count >= th_num:
+                break
+    
+        
+    if count <= th_num :
+        return True
+    else:
+        return False
+
+def eNN(train_data,judged_data,threshold,kind):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    juded_data : pandas dataframe
+        判定するデータ
+    threshold : natural number
+        個数のの閾値
+    kind : string
+        距離の種類
+
+    Returns
+    -------
+    bool
+        Trueならば異常値，Falseならば正常値
+    """
+    
+    all_distance = []
+    
+    for i in len(train_data):
+        data = train_data.loc[i,:]
+        distance = distance(data,judged_data,kind)
+        all_distance.append(distance)
+    
+    dis = sorted(all_distance)[-th_num]
+        
+    if dis >= th_dis :
+        return True
+    else:
+        return False
+
+
+
+        
+    
+    
