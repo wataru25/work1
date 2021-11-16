@@ -1,0 +1,350 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Oct 25 10:12:57 2021
+
+@author: finst
+"""
+
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import csv
+from statistics import mean, variance
+from scipy import stats
+import pandas as pd
+from sklearn.neighbors import KernelDensity
+from sklearn.decomposition import PCA
+from sklearn.decomposition import KernelPCA
+from sklearn.metrics import explained_variance_score
+from sklearn.decomposition import SparsePCA
+from sklearn.decomposition import FastICA
+
+
+import PPCA
+
+
+#==============================================================================
+# データの準備
+#==============================================================================
+# データのディレクトリの指定
+data_path = ""
+# 作業ディレクトリの指定
+main_path = ""
+# 正常なデータの読み込み
+data = []
+
+all_data = pd.read_csv("C:/Users/finst/OneDrive/デスクトップ/wataru/13_仕事/運企予兆/test/data.csv",index_col=0)
+train_data = all_data[:-1]
+judged_data = all_data[40:]
+
+#==============================================================================
+# 関数定義
+#==============================================================================
+# 火照リング
+
+# 近傍法
+
+def distance(data1,data2,kind):
+    """
+    Parameters
+    ----------
+    data1 : pandas dataframe
+    data2 : pandas dataframe
+    kind  : string
+        距離の種類を選択
+    
+    Returns
+    -------
+    Real number
+    data1とdata2の距離を測定
+    
+    """
+    data1_value = data1.values
+    data2_value = data2.values
+    
+    if kind =="E":
+        distance = sum((data1_value-data2_value)**2)
+    elif kind == "m":
+        distance = sum((data1_value-data2_value).abs())
+    elif kind == "c":
+        distance = max((data1_value-data2_value).abs())
+                       
+    return distance
+        
+def kNN(train_data,judged_data,th_num,th_dis,kind):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    juded_data : pandas dataframe
+        判定するデータ
+    threshold : real
+        距離の閾値
+    kind : string
+        距離の種類
+
+    Returns
+    -------
+    bool
+        Trueならば異常値，Falseならば正常値
+    """
+    
+    count = 0
+    
+    for i in len(train_data):
+        data = train_data.iloc[i,:]
+        dist = distance(data,judged_data,kind)
+        if dist < th_dis:
+            count = count + 1
+            if count >= th_num:
+                break
+    
+    if count <= th_num :
+        return [True,count]
+    else:
+        return [False,count]
+
+def eNN(train_data,judged_data,th_dis,th_num,kind):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    juded_data : pandas dataframe
+        判定するデータ
+    threshold : natural number
+        個数のの閾値
+    kind : string
+        距離の種類
+
+    Returns
+    -------
+    bool
+        Trueならば異常値，Falseならば正常値
+    """
+    
+    all_distance = []
+    
+    for i in range(len(train_data)):
+        data = train_data.iloc[i,:]
+        dist = distance(data,judged_data,kind)
+        all_distance.append(dist)
+    
+    dis = sorted(all_distance)[-th_num]
+        
+    if dis >= th_dis :
+        return [True,dis]
+    else:
+        return [False,dis]
+
+
+#カーネル密度推定法
+def kernel_density(train_data,judged_data,kernel_den,band_width,threshold):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    juded_data : pandas dataframe
+        判定するデータ
+    kernel : string
+        使用するカーネル
+    band_width :　実数
+        バンド幅
+    threshold : 実数
+        異常度の閾値
+
+    Returns
+    -------
+    bool
+        Trueならば異常値，Falseならば正常値
+    """
+    # データの加工
+    col_number = len(train_data.columns)
+    vlist = []
+    for i in range(col_number):
+        vlist.append(np.array(all_data.iloc[:,i]))
+    vlist_tuple = tuple(vlist)
+    X = np.vstack(vlist_tuple).T
+    
+    # モデルの定義
+    # bwは自動で調整
+    kde_model = KernelDensity(kernel=kernel_den).fit(X)
+    # 異常度の計算
+    anomaly = -kde_model.score_samples(np.array(judged_data))
+    
+    if anomaly > threshold:
+        return [True,anomaly]
+    else:
+        return [False,anomaly]
+    
+def reduction_PCA(train_data,judged_data,after_dim):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    judged_data : pandas dataframe
+        異常値判定データ
+    after_dim : 実数
+        次元削減後の次元
+    Returns
+    -------
+    train_data
+        次元削減後の訓練データ
+    judged_data
+        次元削減後の異常値判定データ
+    ratio
+        寄与率の合計
+    score
+        スコア合計
+    """
+    
+    pca_model = PCA(n_components = after_dim)
+    pca_model.fit(train_data)
+    after_data_train = pd.DataFrame(pca_model.transform(train_data))
+    after_data_judged = pd.DataFrame(pca_model.transform([judged_data]))
+    
+    ratio = sum(pca_model.explained_variance_ratio_)
+    score = explained_variance_score(train_data, pca_model.inverse_transform(after_data_train))
+    
+    return {"train_data":after_data_train,"judged_data":after_data_judged,"ratio":ratio,"score":score}
+
+def reduction_KernelPCA(train_data,judged_data,after_dim,kernel,gamma=1/len(train_data),degree=3,coef0 = 1):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    judged_data : pandas dataframe
+        異常値判定データ
+    after_dim : int
+        次元削減後の次元
+    kernel : string("linear","poly","rbf","sigmoid","cosine")
+        使用するカーネル関数
+    gamma : float
+        rbfとpolyのカーネル係数
+    degree : int
+        polyの係数
+    coef0 : float
+        polyとsigmoidの独立係数
+        
+    Returns
+    -------
+    train_data
+        次元削減後の訓練データ
+    judged_data
+        次元削減後の異常値判定データ
+    ratio
+        寄与率の合計
+    score
+        スコア合計
+    
+    """
+    
+    kpca_model = KernelPCA(n_components = after_dim,kernel = kernel,gamma = gamma,degree= degree,coef0 = coef0, fit_inverse_transform=True)
+    kpca_model.fit(train_data)
+    after_data_train = pd.DataFrame(kpca_model.transform(train_data))
+    after_data_judged = pd.DataFrame(kpca_model.transform([judged_data]))
+    
+    ratio = sum(np.var(after_data_train,axis = 0)/np.sum(np.var(after_data_train,axis = 0)))
+    score = explained_variance_score(train_data, kpca_model.inverse_transform(after_data_train))
+    
+    return {"train_data":after_data_train,"judged_data":after_data_judged,"ratio":ratio,"score":score}
+
+def reduction_SparsePCA(train_data,judged_data,after_dim,alpha = 1):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    judged_data : pandas dataframe
+        異常値判定データ
+    after_dim : int
+        次元削減後の次元
+    alpha : float
+        L1正則化の強さ
+        
+    Returns
+    -------
+    pandas dataframe
+        次元削減後のデータ
+    実数
+        寄与率の合計
+    """
+    
+    spca_model = SparsePCA(n_components = after_dim,alpha = alpha)
+    spca_model.fit(train_data)
+    after_data_train = pd.DataFrame(spca_model.transform(train_data))
+    after_data_judged = pd.DataFrame(spca_model.transform([judged_data]))
+    
+    ratio = sum(spca_model.explained_variance_ratio_)
+    #score = explained_variance_score(train_data, spca_model.inverse_transform(after_data_train))
+    
+    return {"train_data":after_data_train,"judged_data":after_data_judged,"ratio":ratio}
+
+def reduction_ProbablePCA(train_data,judged_data,after_dim):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    judged_data : pandas dataframe
+        異常値判定データ
+    after_dim : int
+        次元削減後の次元
+        
+    Returns
+    -------
+    pandas dataframe
+        次元削減後のデータ
+    実数
+        寄与率の合計
+    """
+    train_data_numpy = train_data.values
+    judged_data_numpy = judged_data.values
+    
+    ppca_model = PPCA.BPCA(m=after_dim)
+    ppca_model.fit(train_data_numpy)
+
+    after_data_train = pd.DataFrame(ppca_model.transform(train_data_numpy))
+    after_data_judged = pd.DataFrame(ppca_model.transform(judged_data_numpy))
+    
+    #ratio = sum(spca_model.explained_variance_ratio_)
+    #score = explained_variance_score(train_data, spca_model.inverse_transform(after_data_train))
+    
+    return {"train_data":after_data_train,"judged_data":after_data_judged}
+
+def reduction_ICA(train_data,judged_data,after_dim):
+    """
+    Parameters
+    ----------
+    train_data : pandas dataframe
+        訓練データ
+    judged_data : pandas dataframe
+        異常値判定データ
+    after_dim : int
+        次元削減後の次元
+    alpha : float
+        L1正則化の強さ
+        
+    Returns
+    -------
+    pandas dataframe
+        次元削減後のデータ
+    実数
+        寄与率の合計
+    """
+    
+    ica_model = FastICA(n_components = after_dim)
+    ica_model.fit(train_data)
+    after_data_train = pd.DataFrame(ica_model.transform(train_data))
+    after_data_judged = pd.DataFrame(ica_model.transform([judged_data]))
+    
+    #ratio = sum(ica_model.explained_variance_ratio_)
+    #score = explained_variance_score(train_data, spca_model.inverse_transform(after_data_train))
+    
+    return {"train_data":after_data_train,"judged_data":after_data_judged}
+    
+    
