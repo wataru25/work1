@@ -1,0 +1,184 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Nov 14 16:13:29 2021
+
+@author: finst
+"""
+
+import os
+from pandas import read_csv as rc
+from functions_anomaly import *
+import pandas as pd
+import openpyxl as px
+import glob
+import csv
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime as dt
+
+#作業ディレクトリを指定
+work_path = "C:/Users/finst/OneDrive/デスクトップ/wataru/13_仕事/運企予兆"
+os.chdir(work_path)
+
+#==============================================================================
+#読み込み
+#==============================================================================
+#データのディレクトリを指定
+data_path = "C:/Users/finst/OneDrive/デスクトップ/wataru/13_仕事/運企予兆/test/data.csv"
+#出力パスを指定
+main_path = "C:/Users/finst/OneDrive/デスクトップ/wataru/13_仕事/運企予兆/test/出力"
+#手法一覧
+reduction_list_all = ["PCA","KPCA","SPCA","PPCA","ICA","None"]
+anomaly_list_all = ["hotelling","kNN","eNN","kernel","isolation"]
+
+#==============================================================================
+# データの準備
+#==============================================================================
+#全データの読み込み
+all_data = rc(data_path,index_col=0)
+#正常なデータの指定
+valid_data = all_data.loc["2000/1/1":"2000/7/10",:]
+#判定したいデータの指定
+#judge_data = all_data.loc["2020/5/5",:]
+
+##############################################################################
+#パラメータの設定
+##############################################################################
+#カーネルPCAのパラメータ
+kernel = "linear"
+gamma = 1/len(valid_data)
+degree = 3
+coef0 = 1
+#スパースPCAのパラメータ
+alpha = 1
+
+#ホテリング
+threshold_hote=0.1
+#kNNのパラメータ
+th_num_kNN = 2
+th_dis_kNN = 2
+kind_kNN = "E"
+#eNNのパラメータ
+th_num_eNN = 3
+th_dis_eNN = 1
+kind_eNN = "E"
+#カーネル密度
+kernel_den = "linear" #['gaussian', 'tophat', 'epanechnikov','exponential', 'linear', 'cosine']
+band_width = 0.1
+threshold_kernel = 0.1
+
+##############################################################################
+#計算の設定
+##############################################################################
+#出力する手法一覧
+reduction_output = ["KPCA","SPCA","PPCA","ICA"]
+anomaly_output = ["hotelling","kNN","eNN","kernel"]
+after_dim = 20
+
+##############################################################################
+#関数定義
+##############################################################################
+
+def calculate_one_method(reduction,anomaly,after_dim):
+    global anomaly_list
+    data_index = all_data.index
+    anomaly_list = []
+    rn = len(all_data)
+    for i in range(rn):
+        judge_data = all_data.iloc[i,]
+        
+        if reduction == "None":
+            judge_data_use = judge_data
+        elif reduction == "PPCA":
+            judge_data_use = pd.DataFrame(model.transform(judge_data.values)).iloc[:,0]
+        else:
+            judge_data_use = pd.DataFrame(model.transform([judge_data])).iloc[0]
+        
+      
+        if anomaly == "hotelling":
+            result = hotelling(valid_data_use,judge_data_use,threshold_hote)
+        elif anomaly == "kNN":
+            result = kNN(valid_data_use,judge_data_use,th_num_kNN,th_dis_kNN,kind_kNN)
+        elif anomaly == "eNN":
+            result = eNN(valid_data_use,judge_data_use,th_dis_eNN,th_num_eNN,kind_eNN)
+        elif anomaly == "kernel":
+            result = kernel_density(valid_data_use,judge_data_use,kernel_den,band_width,threshold_kernel)
+        elif anomaly == "isolation":
+            result = isolation_forest(valid_data_use,judge_data_use)
+        
+        result.insert(0,dt.strptime(all_data.index[i],"%Y/%m/%d"))
+        result.insert(0,reduction+"_"+anomaly)
+        anomaly_list.append(result)
+        print(reduction+"_"+anomaly+"---"+str(i)+"/"+str(rn))
+    
+    
+    if anomaly == "isolation":
+        anomaly_list = pd.DataFrame(anomaly_list,index = all_data.index)
+        del anomaly_list[0]
+        del anomaly_list[1]
+        threshold = ""
+        anomaly_list.columns = ["異常or正常"]
+    else:
+        anomaly_list = pd.DataFrame(anomaly_list,index = all_data.index)
+        del anomaly_list[0]
+        anomaly_list.columns = ["日時","正常or異常","異常値","閾値"]
+        
+        fig = plt.figure()
+        ax1 = fig.add_subplot(1,1,1)
+        plt.xticks(rotation=90)
+        ax1.plot(anomaly_list["日時"],anomaly_list["異常値"])
+        ax1.set_ylabel("anomaly")
+        ax1.set_xlabel("date")
+        plt.show()
+        fig.savefig(reduction+"_"+anomaly)
+        
+        del anomaly_list["日時"]
+        threshold = str(result[3])
+        anomaly_list.columns = ["異常or正常","異常値","閾値"]
+    
+        
+    file_name = "anomaly"+"_"+reduction+"_"+anomaly+"_"+threshold+".csv"
+    pd.DataFrame(anomaly_list).to_csv(main_path+"/"+file_name)
+
+##############################################################################
+#計算実行
+##############################################################################
+
+
+anomaly_list_summary = {}
+for reduction in reduction_output:
+    if reduction == "PCA":
+        res = reduction_PCA(valid_data,judge_data,after_dim)
+    elif reduction == "KPCA":
+        res = reduction_KernelPCA(valid_data,judge_data,after_dim,kernel,gamma=gamma,degree=degree,coef0 = coef0)
+        valid_data_use = res["valid_data"]
+        model = res["model"]
+    elif reduction == "SPCA":
+        res = reduction_SparsePCA(valid_data,judge_data,after_dim,alpha = alpha)
+        valid_data_use = res["valid_data"]
+    elif reduction == "PPCA":
+        res = reduction_ProbablePCA(valid_data,judge_data,after_dim)
+    elif reduction == "ICA":
+        res = reduction_ICA(valid_data,judge_data,after_dim)
+        valid_data_use = res["valid_data"]
+    elif reduction == "None":
+        valid_data_use = valid_data
+
+    if reduction != "None":
+        model = res["model"]
+        valid_data_use = res["valid_data"]
+            
+    for anomaly in anomaly_output:
+        calculate_one_method(reduction,anomaly,after_dim)
+        for re in anomaly_list:
+            anomaly_list_summary[reduction+"_"+anomaly]=anomaly_list
+
+
+
+
+
+
+
+
+
+
