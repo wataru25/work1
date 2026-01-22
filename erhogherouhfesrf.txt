@@ -1,0 +1,2596 @@
+Option Explicit
+
+'============================================================
+' Excel 計算負荷診断（ブックBからブックAを診断）
+'
+' 目的：
+'  1) シートごとの「計算時間（実測秒）」を出す
+'  2) 寄与率（%）= シート計算時間 / 全シート計算時間合計 を出す
+'  3) なぜ重いか：件数（揮発性/全列参照/重関数/数式セル等）と具体例で特定する
+'============================================================
+
+'========================
+' ユーザー設定（ブックB）
+'========================
+Private Const CONTROL_SHEET_NAME As String = "Control"
+Private Const TARGET_PATH_CELL As String = "B2"
+Private Const REPORT_SHEET_NAME As String = "Report"
+
+Private Const CALC_REPEAT As Long = 2
+Private Const TOP_SHEETS_DEEP_DIVE As Long = 5
+Private Const MAX_SAMPLES_PER_CATEGORY As Long = 12
+Private Const TOP_REPEATED_FORMULAS As Long = 20
+Private Const TOP_CF_RULES As Long = 8
+Private Const FORMULA_CHUNK_ROWS As Long = 2000
+Private Const MAX_FORMULAS_FOR_FREQUENCY As Double = 250000
+
+' 値貼り（数式→値）にした場合のファイル容量削減を測定する
+Private Const ENABLE_VALUEPASTE_SIZE_TEST As Boolean = True
+
+' 0: 全シート / N: 計算時間上位Nシートのみ（時間短縮したい場合）
+Private Const VALUEPASTE_SHEET_LIMIT As Long = 0
+
+
+'============================================================
+' エントリポイント
+'============================================================
+Public Sub Run_CalcHeavyDiagnosisJP()
+    Dim targetPath As String
+    targetPath = Trim$(CStr(ThisWorkbook.Worksheets(CONTROL_SHEET_NAME).Range(TARGET_PATH_CELL).value))
+
+    If Len(targetPath) = 0 Then
+        MsgBox "Control!" & TARGET_PATH_CELL & " に調査対象ブック(A)のフルパスを入力してください。", vbExclamation
+        Exit Sub
+    End If
+
+    Dim report As Worksheet
+    Set report = EnsureSheet(ThisWorkbook, REPORT_SHEET_NAME)
+    PrepareReportSheet report, targetPath
+
+    DiagnoseWorkbook targetPath, report
+
+    report.Activate
+    MsgBox "診断レポートを出力しました: " & report.name, vbInformation
+End Sub
+
+
+'============================================================
+' メイン診断
+'============================================================
+Private Sub DiagnoseWorkbook(ByVal targetPath As String, ByVal report As Worksheet)
+    Dim prevScreen As Boolean, prevEvents As Boolean, prevAlerts As Boolean
+    Dim prevCalc As XlCalculation, prevStatusBar As Variant
+
+    prevScreen = Application.ScreenUpdating
+    prevEvents = Application.EnableEvents
+    prevAlerts = Application.DisplayAlerts
+    prevCalc = Application.Calculation
+    prevStatusBar = Application.StatusBar
+
+    On Error GoTo Fail
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+
+    Dim tOpen0 As Double: tOpen0 = NowSeconds()
+    Dim wb As Workbook
+    Set wb = OpenWorkbookReadOnlyNoLinks(targetPath)
+    Dim openSeconds As Double: openSeconds = SecondsDiff(tOpen0, NowSeconds())
+
+    If wb Is Nothing Then
+        WriteKV report, "エラー", "ブックを開けませんでした", "パス/権限/破損/パスワード/ネットワークを確認してください。"
+        GoTo CleanExit
+    End If
+
+    '-----------------------------
+    ' 1) ブック全体情報
+    '-----------------------------
+    Dim fileSizeMB As Double
+    fileSizeMB = SafeFileSizeMB(targetPath)
+
+    Dim linksList As Collection: Set linksList = New Collection
+    Dim connectionsList As Collection: Set connectionsList = New Collection
+
+    Dim wbInfo As Object: Set wbInfo = CreateObject("Scripting.Dictionary")
+    wbInfo("OpenSeconds") = openSeconds
+    wbInfo("FileSizeMB") = fileSizeMB
+    wbInfo("SheetCount") = wb.Worksheets.Count
+    wbInfo("StyleCount") = SafeLong(wb.Styles.Count)
+    wbInfo("NameCount") = SafeLong(wb.names.Count)
+    wbInfo("PivotCacheCount") = SafeLong(wb.PivotCaches.Count)
+
+    CollectLinkSources wb, linksList
+    wbInfo("LinkCount") = linksList.Count
+
+    CollectConnections wb, connectionsList
+    wbInfo("ConnectionCount") = connectionsList.Count
+
+    '-----------------------------
+    ' 2) シート別メトリクス収集
+    '-----------------------------
+    Dim sheets As Object: Set sheets = CreateObject("Scripting.Dictionary")
+    Dim ws As Worksheet
+
+    For Each ws In wb.Worksheets
+        Application.StatusBar = "診断中: " & ws.name & "（基本情報/数式解析）"
+
+        Dim m As Object: Set m = CreateObject("Scripting.Dictionary")
+        m("SheetName") = ws.name
+
+        ' UsedRange
+        Dim usedRows As Long, usedCols As Long, usedArea As Double, usedAddr As String
+        GetUsedRangeInfo ws, usedRows, usedCols, usedArea, usedAddr
+        m("UsedRows") = usedRows
+        m("UsedCols") = usedCols
+        m("UsedArea") = usedArea
+        m("UsedAddr") = usedAddr
+
+        ' オブジェクト
+        m("Shapes") = SafeLong(ws.Shapes.Count)
+        m("Charts") = SafeLong(ws.ChartObjects.Count)
+
+        ' テーブル
+        Dim tableCount As Long, tableCells As Double
+        GetTableInfo ws, tableCount, tableCells
+        m("TableCount") = tableCount
+        m("TableCells") = tableCells
+
+        ' ピボット
+        m("PivotCount") = SafeLong(ws.PivotTables.Count)
+
+        ' 条件付き書式（ルール数のみ）
+        m("CFRules") = GetCFRulesCount(ws)
+
+        ' 数式：セル数 + 揮発性/全列参照/重関数の件数
+        Dim formulaCells As Double, volatileCells As Double, wholeColCells As Double, expensiveCells As Double
+        AnalyzeFormulasCountOnly ws, formulaCells, volatileCells, wholeColCells, expensiveCells
+
+        m("FormulaCells") = formulaCells
+        m("VolatileCells") = volatileCells
+        m("WholeColCells") = wholeColCells
+        m("ExpensiveCells") = expensiveCells
+
+        DictPutObj sheets, ws.name, m
+    Next ws
+
+    '-----------------------------
+    ' 3) シート別 計算時間（実測）
+    '-----------------------------
+    Dim totalCalcSeconds As Double
+    totalCalcSeconds = 0#
+
+    For Each ws In wb.Worksheets
+        Application.StatusBar = "診断中: " & ws.name & "（計算時間計測）"
+
+        Dim calcSec As Double
+        calcSec = MeasureSheetCalcSeconds(ws, CALC_REPEAT)
+
+        sheets(ws.name)("CalcSeconds") = calcSec
+        totalCalcSeconds = totalCalcSeconds + calcSec
+    Next ws
+
+    If totalCalcSeconds <= 0 Then totalCalcSeconds = 0.000001
+
+    ' 寄与率（%）
+    Dim key As Variant
+    For Each key In sheets.keys
+        sheets(key)("CalcSharePct") = 100# * sheets(key)("CalcSeconds") / totalCalcSeconds
+    Next key
+
+    ' （追加）値貼り時のファイル容量削減（シート別：実測）
+    If ENABLE_VALUEPASTE_SIZE_TEST Then
+        Application.StatusBar = "診断中: 値貼り（数式→値）による容量削減を測定中..."
+        ComputeValuePasteSizeReduction wb, targetPath, sheets, VALUEPASTE_SHEET_LIMIT
+    End If
+
+
+    '-----------------------------
+    ' 4) 上位シートの深掘り（具体例）
+    '-----------------------------
+    Dim topSheets As Collection
+    Set topSheets = GetTopSheetsByCalcTime(sheets, TOP_SHEETS_DEEP_DIVE)
+
+    Dim deepDives As Object: Set deepDives = CreateObject("Scripting.Dictionary")
+    Dim i As Long
+    For i = 1 To topSheets.Count
+        Dim sName As String: sName = CStr(topSheets(i))
+        Application.StatusBar = "深掘り中: " & sName & "（式サンプル/頻出数式/巨大CF）"
+
+        Dim dd As Object: Set dd = CreateObject("Scripting.Dictionary")
+        AnalyzeFormulasDeep wb.Worksheets(sName), dd
+        AnalyzeConditionalFormattingDeep wb.Worksheets(sName), dd
+
+        DictPutObj deepDives, sName, dd
+    Next i
+
+    '-----------------------------
+    ' 5) レポート出力
+    '-----------------------------
+    OutputReport report, wbInfo, sheets, totalCalcSeconds, topSheets, deepDives, linksList, connectionsList
+
+CleanExit:
+    On Error Resume Next
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+
+    Application.StatusBar = prevStatusBar
+    Application.ScreenUpdating = prevScreen
+    Application.EnableEvents = prevEvents
+    Application.DisplayAlerts = prevAlerts
+    Application.Calculation = prevCalc
+    Exit Sub
+
+Fail:
+    WriteKV report, "エラー", "実行時エラー", "Err.Number=" & Err.Number & " / " & Err.Description
+    Resume CleanExit
+End Sub
+
+
+'============================================================
+' レポート出力
+'============================================================
+Private Sub OutputReport( _
+    ByVal report As Worksheet, _
+    ByVal wbInfo As Object, _
+    ByVal sheets As Object, _
+    ByVal totalCalcSeconds As Double, _
+    ByVal topSheets As Collection, _
+    ByVal deepDives As Object, _
+    ByVal linksList As Collection, _
+    ByVal connectionsList As Collection)
+
+    Dim r As Long: r = 1
+
+    r = 5
+    r = WriteExecutiveSummaryMax(report, r, wbInfo, sheets, totalCalcSeconds)
+    r = WriteReportGuideAndDefinitions(report, r)
+
+    WriteSection report, r, "【ブック全体サマリー】"
+    r = r + 1
+
+    WriteKVAt report, r, "ファイルサイズ(MB)", FormatNumber(wbInfo("FileSizeMB"), 2), "参考"
+    r = r + 1
+    WriteKVAt report, r, "開く時間(秒)", FormatNumber(wbInfo("OpenSeconds"), 3), "ブックAを読み取り専用で開いた実測"
+    r = r + 1
+    WriteKVAt report, r, "シート数", CStr(wbInfo("SheetCount")), ""
+    r = r + 1
+    WriteKVAt report, r, "外部リンク数", CStr(wbInfo("LinkCount")), "開く/更新を遅くしやすい"
+    r = r + 1
+    WriteKVAt report, r, "接続数", CStr(wbInfo("ConnectionCount")), "PowerQuery/ODBC等"
+    r = r + 1
+    WriteKVAt report, r, "スタイル数", CStr(wbInfo("StyleCount")), "異常に多いと肥大/不安定化"
+    r = r + 1
+    WriteKVAt report, r, "定義名数", CStr(wbInfo("NameCount")), ""
+    r = r + 1
+    WriteKVAt report, r, "PivotCache数", CStr(wbInfo("PivotCacheCount")), "メモリ消費要因"
+    r = r + 2
+
+    WriteSection report, r, "【計算負荷（メイン）】シート別の計算時間と寄与率"
+    r = r + 1
+    WriteKVAt report, r, "全シート計算時間 合計(秒)", FormatNumber(totalCalcSeconds, 3), "（ws.UsedRange.Dirty→ws.Calculate の合計）"
+    r = r + 2
+
+    ' メイン表
+    Dim headerRow As Long: headerRow = r
+    WriteMainTableHeader report, headerRow
+    r = r + 1
+
+    Dim sorted As Collection
+    Set sorted = GetTopSheetsByCalcTime(sheets, sheets.Count)
+
+    Dim idx As Long
+    For idx = 1 To sorted.Count
+        Dim sName As String: sName = CStr(sorted(idx))
+        Dim m As Object: Set m = sheets(sName)
+
+        Dim note As String
+        note = BuildSheetNotes(m)
+
+        WriteMainTableRow report, r, m, note
+        r = r + 1
+    Next idx
+
+    report.Range(report.Cells(headerRow, 1), report.Cells(headerRow, 14)).AutoFilter
+
+    Dim mainFirstRow As Long, mainLastRow As Long
+    mainFirstRow = headerRow + 1
+    mainLastRow = r - 1
+    Call FormatMainTableMax(report, headerRow, mainFirstRow, mainLastRow)
+
+    r = r + 2
+    Dim deepDiveHeaderRow As Long
+    deepDiveHeaderRow = r
+
+    WriteSection report, r, "【上位シート 深掘り】（セル番地＋式／頻出数式／巨大CF）"
+    r = r + 1
+
+    For idx = 1 To topSheets.Count
+        Dim ts As String: ts = CStr(topSheets(idx))
+        Dim dd As Object: Set dd = EnsureDeepDiveDict(deepDives, ts)
+
+        report.Cells(r, 1).value = "■ " & ts & "（計算時間=" & FormatNumber(sheets(ts)("CalcSeconds"), 3) & "秒 / 寄与=" & FormatNumber(sheets(ts)("CalcSharePct"), 1) & "%）"
+        report.Cells(r, 1).Font.Bold = True
+        r = r + 1
+
+        r = OutputFormulaSamples(report, r, "揮発性（INDIRECT/OFFSET/NOW等）サンプル", DeepDiveGetCollection(dd, "VolatileSamples"))
+        r = OutputFormulaSamples(report, r, "全列/全行参照（A:A, 1:1 等）サンプル", DeepDiveGetCollection(dd, "WholeColSamples"))
+        r = OutputFormulaSamples(report, r, "重い関数（SUMPRODUCT/XLOOKUP/FILTER等）サンプル", DeepDiveGetCollection(dd, "ExpensiveSamples"))
+
+        r = OutputTopFormulas(report, r, DeepDiveGetCollection(dd, "TopFormulas"), TOP_REPEATED_FORMULAS)
+        r = OutputTopCFRules(report, r, DeepDiveGetCollection(dd, "TopCFRules"), TOP_CF_RULES)
+
+        r = r + 1
+    Next idx
+
+    r = r + 1
+
+    Dim linksHeaderRow As Long
+    linksHeaderRow = r
+
+    WriteSection report, r, "【外部リンク一覧】"
+    r = r + 1
+    r = OutputList(report, r, "外部リンク", linksList)
+
+    r = r + 1
+    Dim connHeaderRow As Long
+    connHeaderRow = r
+
+    WriteSection report, r, "【接続一覧】"
+    r = r + 1
+    r = OutputList(report, r, "接続", connectionsList)
+
+    ' 見やすさ（現状維持）
+    report.Columns("A").ColumnWidth = 22
+    report.Columns("B").ColumnWidth = 16
+    report.Columns("C").ColumnWidth = 12
+    report.Columns("D").ColumnWidth = 14
+    report.Columns("E").ColumnWidth = 12
+    report.Columns("F").ColumnWidth = 12
+    report.Columns("G").ColumnWidth = 12
+    report.Columns("H").ColumnWidth = 14
+    report.Columns("I").ColumnWidth = 14
+    report.Columns("J").ColumnWidth = 12
+    report.Columns("K").ColumnWidth = 14
+    report.Columns("L").ColumnWidth = 10
+    report.Columns("M").ColumnWidth = 10
+    report.Columns("N").ColumnWidth = 55
+
+    Call CreateJumpLinksMax(report, headerRow, deepDiveHeaderRow, linksHeaderRow, connHeaderRow)
+
+    Dim reportLastRow As Long
+    reportLastRow = report.Cells(report.Rows.Count, "A").End(xlUp).Row
+
+    Call BuildPrintPackA4( _
+        report, _
+        headerRow, _
+        mainFirstRow, _
+        mainLastRow, _
+        deepDiveHeaderRow, _
+        linksHeaderRow, _
+        connHeaderRow, _
+        reportLastRow _
+    )
+End Sub
+
+
+'============================================================
+' メイン表（ヘッダ/行）
+'============================================================
+Private Sub WriteMainTableHeader(ByVal ws As Worksheet, ByVal r As Long)
+    ws.Cells(r, 1).value = "シート名"
+    ws.Cells(r, 2).value = "計算時間(秒)"
+    ws.Cells(r, 3).value = "寄与率(%)"
+    ws.Cells(r, 4).value = "数式セル数"
+    ws.Cells(r, 5).value = "揮発性数"
+    ws.Cells(r, 6).value = "全列参照数"
+    ws.Cells(r, 7).value = "重関数数"
+    ws.Cells(r, 8).value = "UsedRange面積"
+    ws.Cells(r, 9).value = "テーブル規模(セル)"
+    ws.Cells(r, 10).value = "ピボット数"
+    ws.Cells(r, 11).value = "CFルール数"
+    ws.Cells(r, 12).value = "図形数"
+    ws.Cells(r, 13).value = "チャート数"
+    ws.Cells(r, 14).value = "注意/読み取り"
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 14)).Font.Bold = True
+End Sub
+
+Private Sub WriteMainTableRow(ByVal ws As Worksheet, ByVal r As Long, ByVal m As Object, ByVal note As String)
+    ws.Cells(r, 1).value = m("SheetName")
+    ws.Cells(r, 2).value = Round(CDbl(m("CalcSeconds")), 3)
+    ws.Cells(r, 3).value = Round(CDbl(m("CalcSharePct")), 1)
+    ws.Cells(r, 4).value = CLng(m("FormulaCells"))
+    ws.Cells(r, 5).value = CLng(m("VolatileCells"))
+    ws.Cells(r, 6).value = CLng(m("WholeColCells"))
+    ws.Cells(r, 7).value = CLng(m("ExpensiveCells"))
+    ws.Cells(r, 8).value = CLng(m("UsedArea"))
+    ws.Cells(r, 9).value = CLng(m("TableCells"))
+    ws.Cells(r, 10).value = CLng(m("PivotCount"))
+    ws.Cells(r, 11).value = CLng(m("CFRules"))
+    ws.Cells(r, 12).value = CLng(m("Shapes"))
+    ws.Cells(r, 13).value = CLng(m("Charts"))
+    ws.Cells(r, 14).value = note
+End Sub
+
+Private Function BuildSheetNotes(ByVal m As Object) As String
+    Dim notes As String
+    notes = ""
+
+    If CDbl(m("UsedRows")) >= 1000000 Or CDbl(m("UsedCols")) >= 15000 Then
+        notes = notes & "UsedRangeが最大付近（最終セルが遠い疑い）。"
+    ElseIf CDbl(m("UsedArea")) >= 5000000 Then
+        notes = notes & "UsedRange面積が大。"
+    End If
+
+    If CDbl(m("WholeColCells")) >= 1000 Then notes = notes & " 全列参照が多い。"
+    If CDbl(m("VolatileCells")) >= 1000 Then notes = notes & " 揮発性が多い。"
+    If CDbl(m("ExpensiveCells")) >= 5000 Then notes = notes & " 重関数が多い。"
+    If CLng(m("CFRules")) >= 500 Then notes = notes & " CFルールが多い（描画負荷）。"
+
+    ' （追加）値貼り時の容量削減（MB/%）を注意欄に追記
+    If m.Exists("ValuePasteDeltaMB") Then
+        Dim dmb As Double: dmb = CDbl(m("ValuePasteDeltaMB"))
+        Dim dpct As Double: dpct = 0#
+        If m.Exists("ValuePasteDeltaPct") Then dpct = CDbl(m("ValuePasteDeltaPct"))
+
+        ' マイナスや微小は 0 扱い（「低下」を示す指標なので）
+        If dmb < 0 Then dmb = 0
+        If dpct < 0 Then dpct = 0
+
+        notes = notes & " 値貼りで-" & FormatNumber(dmb, 1) & "MB(" & FormatNumber(dpct, 1) & "%)"
+    End If
+
+    BuildSheetNotes = Trim$(notes)
+End Function
+
+
+'============================================================
+' deepDive保持
+'============================================================
+Private Function EnsureDeepDiveDict(ByVal deepDives As Object, ByVal sheetName As String) As Object
+    If deepDives.Exists(sheetName) Then
+        Set EnsureDeepDiveDict = deepDives(sheetName)
+    Else
+        Set EnsureDeepDiveDict = CreateEmptyDeepDiveDict()
+    End If
+End Function
+
+Private Function CreateEmptyDeepDiveDict() As Object
+    Dim dd As Object
+    Set dd = CreateObject("Scripting.Dictionary")
+
+    Dim c As Collection
+    Set c = New Collection: DictPutObj dd, "VolatileSamples", c
+    Set c = New Collection: DictPutObj dd, "WholeColSamples", c
+    Set c = New Collection: DictPutObj dd, "ExpensiveSamples", c
+    Set c = New Collection: DictPutObj dd, "TopFormulas", c
+    Set c = New Collection: DictPutObj dd, "TopCFRules", c
+
+    Set CreateEmptyDeepDiveDict = dd
+End Function
+
+Private Function DeepDiveGetCollection(ByVal dd As Object, ByVal key As String) As Collection
+    If dd.Exists(key) Then
+        Set DeepDiveGetCollection = dd(key)
+    Else
+        Set DeepDiveGetCollection = New Collection
+    End If
+End Function
+
+
+'============================================================
+' 深掘り出力
+'============================================================
+Private Function OutputFormulaSamples(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String, ByVal samples As Collection) As Long
+    ws.Cells(r, 2).value = "● " & title
+    ws.Cells(r, 2).Font.Bold = True
+    r = r + 1
+
+    If samples.Count = 0 Then
+        ws.Cells(r, 3).value = "（該当なし）"
+        OutputFormulaSamples = r + 1
+        Exit Function
+    End If
+
+    ws.Cells(r, 3).value = "番地"
+    ws.Cells(r, 4).value = "式（先頭240文字）"
+    ws.Range(ws.Cells(r, 3), ws.Cells(r, 4)).Font.Bold = True
+    r = r + 1
+
+    Dim i As Long
+    For i = 1 To samples.Count
+        Dim v As Variant: v = samples(i)
+        ws.Cells(r, 3).value = CStr(v(0))
+        SafeWriteText ws, r, 4, v(1)
+        r = r + 1
+    Next i
+
+    OutputFormulaSamples = r + 1
+End Function
+
+Private Function OutputTopFormulas(ByVal ws As Worksheet, ByVal r As Long, ByVal topFormulas As Collection, ByVal topN As Long) As Long
+    ws.Cells(r, 2).value = "● 頻出数式 Top" & topN
+    ws.Cells(r, 2).Font.Bold = True
+    r = r + 1
+
+    If topFormulas.Count = 0 Then
+        ws.Cells(r, 3).value = "（数式が多すぎる等の理由で省略、または該当なし）"
+        OutputTopFormulas = r + 1
+        Exit Function
+    End If
+
+    ws.Cells(r, 3).value = "回数"
+    ws.Cells(r, 4).value = "式（先頭240文字）"
+    ws.Range(ws.Cells(r, 3), ws.Cells(r, 4)).Font.Bold = True
+    r = r + 1
+
+    Dim i As Long
+    For i = 1 To topFormulas.Count
+        Dim v As Variant: v = topFormulas(i)
+        ws.Cells(r, 3).value = CLng(v(0))
+        SafeWriteText ws, r, 4, v(1)
+        r = r + 1
+    Next i
+
+    OutputTopFormulas = r + 1
+End Function
+
+Private Function OutputTopCFRules(ByVal ws As Worksheet, ByVal r As Long, ByVal cfRules As Collection, ByVal topN As Long) As Long
+    ws.Cells(r, 2).value = "● 巨大な条件付き書式ルール Top" & topN & "（描画/操作負荷の典型）"
+    ws.Cells(r, 2).Font.Bold = True
+    r = r + 1
+
+    If cfRules.Count = 0 Then
+        ws.Cells(r, 3).value = "（該当なし、または取得不可）"
+        OutputTopCFRules = r + 1
+        Exit Function
+    End If
+
+    ws.Cells(r, 3).value = "適用セル数"
+    ws.Cells(r, 4).value = "種類"
+    ws.Cells(r, 5).value = "適用範囲（先頭120文字）"
+    ws.Cells(r, 6).value = "条件式（先頭200文字）"
+    ws.Range(ws.Cells(r, 3), ws.Cells(r, 6)).Font.Bold = True
+    r = r + 1
+
+    Dim i As Long
+    For i = 1 To cfRules.Count
+        Dim v As Variant: v = cfRules(i)
+        ws.Cells(r, 3).value = CLng(v(0))
+        SafeWriteText ws, r, 4, v(1)
+        ws.Cells(r, 5).value = Left$(CStr(v(2)), 120)
+        ws.Cells(r, 6).value = Left$(CStr(v(3)), 200)
+        r = r + 1
+    Next i
+
+    OutputTopCFRules = r + 1
+End Function
+
+Private Function OutputList(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String, ByVal items As Collection) As Long
+    ws.Cells(r, 2).value = "● " & title
+    ws.Cells(r, 2).Font.Bold = True
+    r = r + 1
+
+    If items.Count = 0 Then
+        ws.Cells(r, 3).value = "（なし）"
+        OutputList = r + 1
+        Exit Function
+    End If
+
+    Dim i As Long
+    For i = 1 To items.Count
+        ws.Cells(r, 3).value = CStr(items(i))
+        r = r + 1
+    Next i
+
+    OutputList = r + 1
+End Function
+
+
+'============================================================
+' 数式セル範囲（安全）
+'============================================================
+Private Function GetFormulaRangeSafe(ByVal ws As Worksheet) As Range
+    Dim ur As Range
+    Set ur = GetUsedRangeSafe(ws)
+    If ur Is Nothing Then
+        Set GetFormulaRangeSafe = Nothing
+        Exit Function
+    End If
+
+    Dim firstFound As Range, cur As Range
+    Set firstFound = Nothing
+
+    On Error Resume Next
+    Set firstFound = ur.Find(What:="=", LookIn:=xlFormulas, LookAt:=xlPart, _
+                             SearchOrder:=xlByRows, SearchDirection:=xlNext, MatchCase:=False)
+    On Error GoTo 0
+
+    If firstFound Is Nothing Then
+        Set GetFormulaRangeSafe = Nothing
+        Exit Function
+    End If
+
+    Dim hasFormula As Boolean
+    hasFormula = False
+    Set cur = firstFound
+
+    Do
+        If cur.hasFormula Then
+            hasFormula = True
+            Exit Do
+        End If
+
+        On Error Resume Next
+        Set cur = ur.FindNext(cur)
+        On Error GoTo 0
+
+        If cur Is Nothing Then Exit Do
+    Loop While cur.Address <> firstFound.Address
+
+    If Not hasFormula Then
+        Set GetFormulaRangeSafe = Nothing
+        Exit Function
+    End If
+
+    Dim fr As Range
+    Set fr = Nothing
+
+    On Error Resume Next
+    Set fr = ur.SpecialCells(xlCellTypeFormulas)
+    If Err.Number <> 0 Then
+        Err.Clear
+        Set fr = Nothing
+    End If
+    On Error GoTo 0
+
+    Set GetFormulaRangeSafe = fr
+End Function
+
+
+'============================================================
+' 数式解析（全シート網羅：件数のみ）
+'============================================================
+Private Sub AnalyzeFormulasCountOnly( _
+    ByVal ws As Worksheet, _
+    ByRef formulaCells As Double, _
+    ByRef volatileCells As Double, _
+    ByRef wholeColCells As Double, _
+    ByRef expensiveCells As Double)
+
+    formulaCells = 0#: volatileCells = 0#: wholeColCells = 0#: expensiveCells = 0#
+
+    Dim fr As Range
+    Set fr = GetFormulaRangeSafe(ws)
+    If fr Is Nothing Then Exit Sub
+
+    formulaCells = fr.CountLarge
+
+    Dim area As Range
+    For Each area In fr.Areas
+        Dim totalRows As Long, totalCols As Long
+        totalRows = area.Rows.Count
+        totalCols = area.Columns.Count
+
+        Dim startRow As Long
+        For startRow = 1 To totalRows Step FORMULA_CHUNK_ROWS
+            Dim nRows As Long
+            nRows = Application.Min(FORMULA_CHUNK_ROWS, totalRows - startRow + 1)
+
+            Dim block As Range
+            Set block = area.Rows(startRow).Resize(nRows, totalCols)
+
+            Dim arr As Variant
+            arr = block.Formula2
+            CountFormulaArray arr, volatileCells, wholeColCells, expensiveCells
+        Next startRow
+    Next area
+End Sub
+
+Private Sub CountFormulaArray( _
+    ByVal arr As Variant, _
+    ByRef volatileCells As Double, _
+    ByRef wholeColCells As Double, _
+    ByRef expensiveCells As Double)
+
+    If IsArray(arr) Then
+        Dim r As Long, c As Long
+        For r = LBound(arr, 1) To UBound(arr, 1)
+            For c = LBound(arr, 2) To UBound(arr, 2)
+                Dim f As String
+                f = CStr(arr(r, c))
+                If Len(f) > 0 Then
+                    If IsVolatileFormula(f) Then volatileCells = volatileCells + 1#
+                    If ContainsWholeColumnOrRowReference(f) Then wholeColCells = wholeColCells + 1#
+                    If IsLikelyExpensiveFormula(f) Then expensiveCells = expensiveCells + 1#
+                End If
+            Next c
+        Next r
+    Else
+        Dim s As String
+        s = CStr(arr)
+        If Len(s) > 0 Then
+            If IsVolatileFormula(s) Then volatileCells = volatileCells + 1#
+            If ContainsWholeColumnOrRowReference(s) Then wholeColCells = wholeColCells + 1#
+            If IsLikelyExpensiveFormula(s) Then expensiveCells = expensiveCells + 1#
+        End If
+    End If
+End Sub
+
+
+'============================================================
+' 数式解析（深掘り：サンプル/頻出数式）
+'============================================================
+Private Sub AnalyzeFormulasDeep(ByVal ws As Worksheet, ByVal dd As Object)
+    Dim volatileSamples As Collection: Set volatileSamples = New Collection
+    Dim wholeColSamples As Collection: Set wholeColSamples = New Collection
+    Dim expensiveSamples As Collection: Set expensiveSamples = New Collection
+    Dim topFormulas As Collection: Set topFormulas = New Collection
+
+    DictPutObj dd, "VolatileSamples", volatileSamples
+    DictPutObj dd, "WholeColSamples", wholeColSamples
+    DictPutObj dd, "ExpensiveSamples", expensiveSamples
+    DictPutObj dd, "TopFormulas", topFormulas
+
+    Dim fr As Range
+    Set fr = GetFormulaRangeSafe(ws)
+    If fr Is Nothing Then Exit Sub
+
+    CollectFormulaSamples ws, fr, volatileSamples, wholeColSamples, expensiveSamples
+
+    If fr.CountLarge <= MAX_FORMULAS_FOR_FREQUENCY Then
+        Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+        CountFormulaFrequency ws, fr, dict
+        Set topFormulas = ExtractTopFormulas(dict, TOP_REPEATED_FORMULAS)
+        DictPutObj dd, "TopFormulas", topFormulas
+    End If
+End Sub
+
+Private Sub CollectFormulaSamples( _
+    ByVal ws As Worksheet, _
+    ByVal fr As Range, _
+    ByVal volatileSamples As Collection, _
+    ByVal wholeColSamples As Collection, _
+    ByVal expensiveSamples As Collection)
+
+    Dim cell As Range
+    For Each cell In fr.Cells
+        Dim f As String: f = CStr(cell.Formula2)
+
+        If volatileSamples.Count < MAX_SAMPLES_PER_CATEGORY Then
+            If IsVolatileFormula(f) Then volatileSamples.Add Array(cell.Address(False, False), Left$(Replace(f, vbLf, " "), 240))
+        End If
+
+        If wholeColSamples.Count < MAX_SAMPLES_PER_CATEGORY Then
+            If ContainsWholeColumnOrRowReference(f) Then wholeColSamples.Add Array(cell.Address(False, False), Left$(Replace(f, vbLf, " "), 240))
+        End If
+
+        If expensiveSamples.Count < MAX_SAMPLES_PER_CATEGORY Then
+            If IsLikelyExpensiveFormula(f) Then expensiveSamples.Add Array(cell.Address(False, False), Left$(Replace(f, vbLf, " "), 240))
+        End If
+
+        If volatileSamples.Count >= MAX_SAMPLES_PER_CATEGORY _
+           And wholeColSamples.Count >= MAX_SAMPLES_PER_CATEGORY _
+           And expensiveSamples.Count >= MAX_SAMPLES_PER_CATEGORY Then
+            Exit For
+        End If
+    Next cell
+End Sub
+
+Private Sub CountFormulaFrequency(ByVal ws As Worksheet, ByVal fr As Range, ByVal dict As Object)
+    Dim area As Range
+    For Each area In fr.Areas
+        Dim totalRows As Long, totalCols As Long
+        totalRows = area.Rows.Count
+        totalCols = area.Columns.Count
+
+        Dim startRow As Long
+        For startRow = 1 To totalRows Step FORMULA_CHUNK_ROWS
+            Dim nRows As Long
+            nRows = Application.Min(FORMULA_CHUNK_ROWS, totalRows - startRow + 1)
+
+            Dim block As Range
+            Set block = area.Rows(startRow).Resize(nRows, totalCols)
+
+            Dim arr As Variant
+            arr = block.Formula2
+            AddFrequencyFromArray arr, dict
+        Next startRow
+    Next area
+End Sub
+
+Private Sub AddFrequencyFromArray(ByVal arr As Variant, ByVal dict As Object)
+    If IsArray(arr) Then
+        Dim r As Long, c As Long
+        For r = LBound(arr, 1) To UBound(arr, 1)
+            For c = LBound(arr, 2) To UBound(arr, 2)
+                Dim f As String
+                f = CStr(arr(r, c))
+                If Len(f) > 0 Then
+                    If dict.Exists(f) Then
+                        dict(f) = CLng(dict(f)) + 1
+                    Else
+                        dict.Add f, 1
+                    End If
+                End If
+            Next c
+        Next r
+    Else
+        Dim s As String
+        s = CStr(arr)
+        If Len(s) > 0 Then
+            If dict.Exists(s) Then
+                dict(s) = CLng(dict(s)) + 1
+            Else
+                dict.Add s, 1
+            End If
+        End If
+    End If
+End Sub
+
+Private Function ExtractTopFormulas(ByVal dict As Object, ByVal topN As Long) As Collection
+    Dim result As New Collection
+    If dict.Count = 0 Then
+        Set ExtractTopFormulas = result
+        Exit Function
+    End If
+
+    Dim keys() As Variant, vals() As Long
+    Dim n As Long: n = dict.Count
+    ReDim keys(1 To n)
+    ReDim vals(1 To n)
+
+    Dim i As Long: i = 0
+    Dim k As Variant
+    For Each k In dict.keys
+        i = i + 1
+        keys(i) = k
+        vals(i) = CLng(dict(k))
+    Next k
+
+    QuickSortByCountDesc keys, vals, 1, n
+
+    Dim limit As Long: limit = topN
+    If n < limit Then limit = n
+
+    For i = 1 To limit
+        result.Add Array(vals(i), Left$(Replace(CStr(keys(i)), vbLf, " "), 240))
+    Next i
+
+    Set ExtractTopFormulas = result
+End Function
+
+Private Sub QuickSortByCountDesc(ByRef keys() As Variant, ByRef vals() As Long, ByVal first As Long, ByVal last As Long)
+    Dim i As Long, j As Long, pivot As Long
+    Dim tmpV As Long, tmpK As Variant
+
+    i = first: j = last
+    pivot = vals((first + last) \ 2)
+
+    Do While i <= j
+        Do While vals(i) > pivot: i = i + 1: Loop
+        Do While vals(j) < pivot: j = j - 1: Loop
+        If i <= j Then
+            tmpV = vals(i): vals(i) = vals(j): vals(j) = tmpV
+            tmpK = keys(i): keys(i) = keys(j): keys(j) = tmpK
+            i = i + 1: j = j - 1
+        End If
+    Loop
+
+    If first < j Then QuickSortByCountDesc keys, vals, first, j
+    If i < last Then QuickSortByCountDesc keys, vals, i, last
+End Sub
+
+
+'============================================================
+' 条件付き書式：巨大ルールTopN（安全版）
+'============================================================
+Private Sub AnalyzeConditionalFormattingDeep(ByVal ws As Worksheet, ByVal dd As Object)
+    Dim topRules As Collection
+    Set topRules = New Collection
+    DictPutObj dd, "TopCFRules", topRules
+
+    Dim rng As Range
+    Set rng = GetUsedRangeSafe(ws)
+    If rng Is Nothing Then Exit Sub
+
+    Dim fcCount As Long
+    fcCount = GetFormatConditionsCountSafe(rng)
+    If fcCount <= 0 Then Exit Sub
+
+    Dim i As Long
+    For i = 1 To fcCount
+        Dim fc As Object
+        Set fc = GetFormatConditionSafe(rng, i)
+        If fc Is Nothing Then GoTo ContinueNext
+
+        Dim appliesCells As Double
+        Dim appliesAddr As String
+        Dim typeText As String
+        Dim f1 As String
+
+        appliesCells = GetAppliesCellsSafe(fc)
+        appliesAddr = GetAppliesAddrSafe(fc)
+        typeText = FormatConditionTypeToTextFromObject(fc)
+        f1 = GetFormatConditionFormula1Safe(fc)
+
+        AddTopCFRules topRules, TOP_CF_RULES, appliesCells, typeText, appliesAddr, f1
+
+ContinueNext:
+    Next i
+End Sub
+
+Private Sub AddTopCFRules(ByVal col As Collection, ByVal maxN As Long, ByVal appliesCells As Double, ByVal typeText As String, ByVal addr As String, ByVal f1 As String)
+    Dim item As Variant
+    item = Array(appliesCells, typeText, addr, f1)
+
+    If col.Count = 0 Then
+        col.Add item
+        Exit Sub
+    End If
+
+    Dim i As Long
+    For i = 1 To col.Count
+        If appliesCells > CDbl(col(i)(0)) Then
+            col.Add item, , i
+            If col.Count > maxN Then col.Remove col.Count
+            Exit Sub
+        End If
+    Next i
+
+    If col.Count < maxN Then col.Add item
+End Sub
+
+
+'============================================================
+' 計算時間（実測）
+'============================================================
+Private Function MeasureSheetCalcSeconds(ByVal ws As Worksheet, ByVal repeatCount As Long) As Double
+    Dim i As Long
+    Dim sumSec As Double: sumSec = 0#
+
+    For i = 1 To repeatCount
+        On Error Resume Next
+        ws.UsedRange.Dirty
+        On Error GoTo 0
+
+        Dim t0 As Double: t0 = NowSeconds()
+        ws.Calculate
+        Dim t1 As Double: t1 = NowSeconds()
+
+        sumSec = sumSec + SecondsDiff(t0, t1)
+    Next i
+
+    MeasureSheetCalcSeconds = sumSec / repeatCount
+End Function
+
+
+'============================================================
+' シート順位（計算時間降順）
+'============================================================
+Private Function GetTopSheetsByCalcTime(ByVal sheets As Object, ByVal topN As Long) As Collection
+    Dim result As New Collection
+    If sheets.Count = 0 Then
+        Set GetTopSheetsByCalcTime = result
+        Exit Function
+    End If
+
+    Dim n As Long: n = sheets.Count
+    Dim names() As String, vals() As Double
+    ReDim names(1 To n)
+    ReDim vals(1 To n)
+
+    Dim i As Long: i = 0
+    Dim k As Variant
+    For Each k In sheets.keys
+        i = i + 1
+        names(i) = CStr(k)
+        vals(i) = CDbl(sheets(k)("CalcSeconds"))
+    Next k
+
+    QuickSortSheets names, vals, 1, n
+
+    Dim limit As Long: limit = topN
+    If n < limit Then limit = n
+
+    For i = 1 To limit
+        result.Add names(i)
+    Next i
+
+    Set GetTopSheetsByCalcTime = result
+End Function
+
+Private Sub QuickSortSheets(ByRef names() As String, ByRef vals() As Double, ByVal first As Long, ByVal last As Long)
+    Dim i As Long, j As Long
+    Dim pivot As Double
+    Dim tmpV As Double, tmpN As String
+
+    i = first: j = last
+    pivot = vals((first + last) \ 2)
+
+    Do While i <= j
+        Do While vals(i) > pivot: i = i + 1: Loop
+        Do While vals(j) < pivot: j = j - 1: Loop
+        If i <= j Then
+            tmpV = vals(i): vals(i) = vals(j): vals(j) = tmpV
+            tmpN = names(i): names(i) = names(j): names(j) = tmpN
+            i = i + 1: j = j - 1
+        End If
+    Loop
+
+    If first < j Then QuickSortSheets names, vals, first, j
+    If i < last Then QuickSortSheets names, vals, i, last
+End Sub
+
+
+'============================================================
+' ブック全体：リンク/接続
+'============================================================
+Private Sub CollectLinkSources(ByVal wb As Workbook, ByVal outList As Collection)
+    On Error GoTo SafeExit
+    Dim links As Variant
+    links = wb.LinkSources(Type:=xlExcelLinks)
+    If IsEmpty(links) Then GoTo SafeExit
+
+    Dim i As Long
+    For i = LBound(links) To UBound(links)
+        outList.Add CStr(links(i))
+    Next i
+SafeExit:
+End Sub
+
+Private Sub CollectConnections(ByVal wb As Workbook, ByVal outList As Collection)
+    On Error GoTo SafeExit
+    Dim c As WorkbookConnection
+    For Each c In wb.Connections
+        outList.Add c.name & " / Type=" & ConnectionTypeToText(c.Type)
+    Next c
+SafeExit:
+End Sub
+
+Private Function ConnectionTypeToText(ByVal t As XlConnectionType) As String
+    Select Case t
+        Case xlConnectionTypeODBC: ConnectionTypeToText = "ODBC"
+        Case xlConnectionTypeOLEDB: ConnectionTypeToText = "OLEDB"
+        Case xlConnectionTypeTEXT: ConnectionTypeToText = "TEXT"
+        Case xlConnectionTypeWEB: ConnectionTypeToText = "WEB"
+        Case xlConnectionTypeXMLMAP: ConnectionTypeToText = "XMLMAP"
+        Case xlConnectionTypeMODEL: ConnectionTypeToText = "MODEL"
+        Case xlConnectionTypeWORKSHEET: ConnectionTypeToText = "WORKSHEET"
+        Case Else: ConnectionTypeToText = "Other"
+    End Select
+End Function
+
+
+'============================================================
+' シート情報：UsedRange/テーブル/CF
+'============================================================
+Private Sub GetUsedRangeInfo(ByVal ws As Worksheet, ByRef usedRows As Long, ByRef usedCols As Long, ByRef usedArea As Double, ByRef usedAddr As String)
+    On Error Resume Next
+    usedRows = ws.UsedRange.Rows.Count
+    usedCols = ws.UsedRange.Columns.Count
+    usedArea = CDbl(usedRows) * CDbl(usedCols)
+    usedAddr = ws.UsedRange.Address(False, False)
+    On Error GoTo 0
+End Sub
+
+Private Sub GetTableInfo(ByVal ws As Worksheet, ByRef tableCount As Long, ByRef tableCells As Double)
+    tableCount = 0
+    tableCells = 0#
+
+    On Error Resume Next
+    tableCount = ws.ListObjects.Count
+    On Error GoTo 0
+
+    If tableCount = 0 Then Exit Sub
+
+    Dim lo As ListObject
+    For Each lo In ws.ListObjects
+        tableCells = tableCells + CDbl(lo.ListRows.Count) * CDbl(lo.ListColumns.Count)
+    Next lo
+End Sub
+
+Private Function GetCFRulesCount(ByVal ws As Worksheet) As Long
+    On Error GoTo TryUsedRange
+    GetCFRulesCount = ws.UsedRange.FormatConditions.Count
+    Exit Function
+TryUsedRange:
+    GetCFRulesCount = 0
+End Function
+
+
+'============================================================
+' 数式判定
+'============================================================
+Private Function IsVolatileFormula(ByVal formulaText As String) As Boolean
+    Dim f As String: f = UCase$(formulaText)
+    IsVolatileFormula = _
+        (InStr(f, "NOW(") > 0) Or _
+        (InStr(f, "TODAY(") > 0) Or _
+        (InStr(f, "RAND(") > 0) Or _
+        (InStr(f, "RANDBETWEEN(") > 0) Or _
+        (InStr(f, "OFFSET(") > 0) Or _
+        (InStr(f, "INDIRECT(") > 0) Or _
+        (InStr(f, "CELL(") > 0) Or _
+        (InStr(f, "INFO(") > 0)
+End Function
+
+Private Function IsLikelyExpensiveFormula(ByVal formulaText As String) As Boolean
+    Dim f As String: f = UCase$(formulaText)
+
+    If InStr(f, "SUMPRODUCT(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "XLOOKUP(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "XMATCH(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "VLOOKUP(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "FILTER(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "SORT(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "UNIQUE(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "MMULT(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "FREQUENCY(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "AGGREGATE(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "INDIRECT(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+    If InStr(f, "OFFSET(") > 0 Then IsLikelyExpensiveFormula = True: Exit Function
+
+    IsLikelyExpensiveFormula = False
+End Function
+
+Private Function ContainsWholeColumnOrRowReference(ByVal formulaText As String) As Boolean
+    On Error GoTo Fail
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+
+    re.Pattern = "(\$?[A-Z]{1,3}:\$?[A-Z]{1,3})"
+    If re.Test(formulaText) Then
+        ContainsWholeColumnOrRowReference = True
+        Exit Function
+    End If
+
+    re.Pattern = "(\$?\d+:\$?\d+)"
+    If re.Test(formulaText) Then
+        ContainsWholeColumnOrRowReference = True
+        Exit Function
+    End If
+
+    ContainsWholeColumnOrRowReference = False
+    Exit Function
+Fail:
+    ContainsWholeColumnOrRowReference = False
+End Function
+
+
+'============================================================
+' ブックを安全に開く
+'============================================================
+Private Function OpenWorkbookReadOnlyNoLinks(ByVal workbookPath As String) As Workbook
+    On Error GoTo Fail
+    Set OpenWorkbookReadOnlyNoLinks = Application.Workbooks.Open( _
+        Filename:=workbookPath, _
+        UpdateLinks:=0, _
+        ReadOnly:=True, _
+        AddToMru:=False, _
+        IgnoreReadOnlyRecommended:=True, _
+        Notify:=False _
+    )
+    Exit Function
+Fail:
+    Set OpenWorkbookReadOnlyNoLinks = Nothing
+End Function
+
+
+'============================================================
+' Reportシート準備（現状維持）
+'============================================================
+Private Sub PrepareReportSheet(ByVal report As Worksheet, ByVal targetPath As String)
+    report.Cells.Clear
+
+    With report
+        .Cells.Font.name = "Meiryo UI"
+        .Cells.Font.Size = 10
+        .Cells.VerticalAlignment = xlVAlignTop
+        .Cells.WrapText = False
+        .Activate
+        ActiveWindow.DisplayGridlines = False
+        ActiveWindow.Zoom = 110
+    End With
+
+    With report.Range("A1:N1")
+        .Merge
+        .value = "Excel 計算負荷診断レポート（シート別：実測秒＋寄与率 / 原因：件数＋具体例）"
+        .Font.Bold = True
+        .Font.Size = 14
+        .Interior.Color = RGB(45, 55, 72)
+        .Font.Color = RGB(255, 255, 255)
+        .RowHeight = 28
+        .HorizontalAlignment = xlLeft
+        .VerticalAlignment = xlVAlignCenter
+    End With
+
+    report.Range("A2").value = "対象ブックパス"
+    report.Range("B2").value = targetPath
+    report.Range("A3").value = "作成日時"
+    report.Range("B3").value = Now
+
+    With report.Range("A2:N3")
+        .Interior.Color = RGB(247, 250, 252)
+    End With
+    report.Range("A2:A3").Font.Bold = True
+    report.Range("B2").WrapText = True
+
+    report.Columns("A:N").ColumnWidth = 12
+    report.Columns("A").ColumnWidth = 18
+    report.Columns("N").ColumnWidth = 60
+End Sub
+
+Private Sub WriteSection(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String)
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = title
+        .Font.Bold = True
+        .Font.Size = 11
+        .Interior.Color = RGB(226, 232, 240)  '薄いグレー青
+        .Font.Color = RGB(15, 23, 42)
+        .RowHeight = 20
+        .VerticalAlignment = xlVAlignCenter
+    End With
+End Sub
+
+
+Private Sub WriteKV(ByVal ws As Worksheet, ByVal key As String, ByVal value As String, ByVal note As String)
+    Dim r As Long: r = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row + 1
+    WriteKVAt ws, r, key, value, note
+End Sub
+
+Private Sub WriteKVAt(ByVal ws As Worksheet, ByVal r As Long, ByVal key As String, ByVal value As String, ByVal note As String)
+    ws.Cells(r, 1).value = key
+    ws.Cells(r, 2).value = value
+    ws.Cells(r, 3).value = note
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 1)).Font.Bold = True
+End Sub
+
+
+'============================================================
+' 便利：シート作成/取得
+'============================================================
+Private Function EnsureSheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set EnsureSheet = wb.Worksheets(sheetName)
+    On Error GoTo 0
+    If EnsureSheet Is Nothing Then
+        Set EnsureSheet = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        EnsureSheet.name = sheetName
+    End If
+End Function
+
+
+'============================================================
+' Timer/ファイルサイズ/安全取得
+'============================================================
+Private Function NowSeconds() As Double
+    NowSeconds = Timer
+End Function
+
+Private Function SecondsDiff(ByVal t0 As Double, ByVal t1 As Double) As Double
+    If t1 >= t0 Then
+        SecondsDiff = t1 - t0
+    Else
+        SecondsDiff = (86400# - t0) + t1
+    End If
+End Function
+
+Private Function SafeFileSizeMB(ByVal path As String) As Double
+    On Error GoTo Fail
+    SafeFileSizeMB = FileLen(path) / 1024# / 1024#
+    Exit Function
+Fail:
+    SafeFileSizeMB = 0#
+End Function
+
+Private Function SafeLong(ByVal v As Variant) As Long
+    On Error GoTo Fail
+    SafeLong = CLng(v)
+    Exit Function
+Fail:
+    SafeLong = 0
+End Function
+
+Private Sub DictPutObj(ByVal dict As Object, ByVal key As String, ByVal obj As Object)
+    On Error Resume Next
+    If dict.Exists(key) Then dict.Remove key
+    On Error GoTo 0
+    dict.Add key, obj
+End Sub
+
+Private Function GetUsedRangeSafe(ByVal ws As Worksheet) As Range
+    Dim ur As Range
+    On Error Resume Next
+    Set ur = ws.UsedRange
+    If Err.Number <> 0 Then
+        Err.Clear
+        Set ur = Nothing
+    End If
+    On Error GoTo 0
+    Set GetUsedRangeSafe = ur
+End Function
+
+
+'============================================================
+' FormatConditions用の安全取得
+'============================================================
+Private Function GetFormatConditionsCountSafe(ByVal rng As Range) As Long
+    On Error Resume Next
+    GetFormatConditionsCountSafe = rng.FormatConditions.Count
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetFormatConditionsCountSafe = 0
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function GetFormatConditionSafe(ByVal rng As Range, ByVal index As Long) As Object
+    Dim fc As Object
+    Set fc = Nothing
+
+    On Error Resume Next
+    Set fc = rng.FormatConditions(index)
+    If Err.Number <> 0 Then
+        Err.Clear
+        Set fc = Nothing
+    End If
+    On Error GoTo 0
+
+    Set GetFormatConditionSafe = fc
+End Function
+
+Private Function GetAppliesCellsSafe(ByVal fc As Object) As Double
+    On Error Resume Next
+    GetAppliesCellsSafe = fc.AppliesTo.CountLarge
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetAppliesCellsSafe = 0#
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function GetAppliesAddrSafe(ByVal fc As Object) As String
+    On Error Resume Next
+    GetAppliesAddrSafe = fc.AppliesTo.Address(False, False)
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetAppliesAddrSafe = ""
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function FormatConditionTypeToTextFromObject(ByVal fc As Object) As String
+    Dim t As Long
+    t = GetLongPropSafe(fc, "Type", -1)
+
+    Select Case t
+        Case 1: FormatConditionTypeToTextFromObject = "セル値"
+        Case 2: FormatConditionTypeToTextFromObject = "数式"
+        Case 3: FormatConditionTypeToTextFromObject = "カラースケール"
+        Case 4: FormatConditionTypeToTextFromObject = "データバー"
+        Case 5: FormatConditionTypeToTextFromObject = "Top10"
+        Case 6: FormatConditionTypeToTextFromObject = "アイコンセット"
+        Case 8
+            Dim du As Long
+            du = GetLongPropSafe(fc, "DupeUnique", -1)
+            If du = 1 Then
+                FormatConditionTypeToTextFromObject = "重複値（UniqueValues）"
+            ElseIf du = 0 Then
+                FormatConditionTypeToTextFromObject = "一意値（UniqueValues）"
+            Else
+                FormatConditionTypeToTextFromObject = "一意/重複（UniqueValues）"
+            End If
+        Case 9: FormatConditionTypeToTextFromObject = "テキスト"
+        Case 10: FormatConditionTypeToTextFromObject = "空白"
+        Case 11: FormatConditionTypeToTextFromObject = "期間"
+        Case 12: FormatConditionTypeToTextFromObject = "平均以上"
+        Case 13: FormatConditionTypeToTextFromObject = "空白なし"
+        Case 16: FormatConditionTypeToTextFromObject = "エラー"
+        Case 17: FormatConditionTypeToTextFromObject = "エラーなし"
+        Case Else
+            FormatConditionTypeToTextFromObject = "その他(Type=" & CStr(t) & ")"
+    End Select
+End Function
+
+Private Function GetFormatConditionFormula1Safe(ByVal fc As Object) As String
+    Dim t As Long
+    t = GetLongPropSafe(fc, "Type", -1)
+
+    Select Case t
+        Case 1, 2, 5, 8, 9, 10, 11, 12, 13, 16, 17
+            Dim s As String
+            s = GetStringPropSafe(fc, "Formula1", "")
+            s = Replace(s, vbLf, " ")
+            GetFormatConditionFormula1Safe = Left$(s, 200)
+        Case Else
+            GetFormatConditionFormula1Safe = ""
+    End Select
+End Function
+
+Private Function GetLongPropSafe(ByVal obj As Object, ByVal propName As String, ByVal defaultValue As Long) As Long
+    Dim v As Variant
+    On Error Resume Next
+    v = CallByName(obj, propName, VbGet)
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetLongPropSafe = defaultValue
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    On Error Resume Next
+    GetLongPropSafe = CLng(v)
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetLongPropSafe = defaultValue
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function GetStringPropSafe(ByVal obj As Object, ByVal propName As String, ByVal defaultValue As String) As String
+    Dim v As Variant
+    On Error Resume Next
+    v = CallByName(obj, propName, VbGet)
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetStringPropSafe = defaultValue
+        Exit Function
+    End If
+    On Error GoTo 0
+
+    On Error Resume Next
+    GetStringPropSafe = CStr(v)
+    If Err.Number <> 0 Then
+        Err.Clear
+        GetStringPropSafe = defaultValue
+    End If
+    On Error GoTo 0
+End Function
+
+
+'============================================================
+' セルへ「必ず文字列として」安全に書き込む（1004回避）
+'============================================================
+Private Sub SafeWriteText(ByVal ws As Worksheet, ByVal rowIndex As Long, ByVal colIndex As Long, ByVal v As Variant)
+    If rowIndex < 1 Or rowIndex > ws.Rows.Count Then Exit Sub
+    If colIndex < 1 Or colIndex > ws.Columns.Count Then Exit Sub
+
+    Dim cell As Range
+    Set cell = ws.Cells(rowIndex, colIndex)
+    If cell.MergeCells Then Set cell = cell.MergeArea.Cells(1, 1)
+
+    Dim s As String
+    If IsError(v) Then
+        s = "#ERROR"
+    Else
+        s = CStr(v)
+    End If
+
+    s = Replace(s, vbCrLf, " ")
+    s = Replace(s, vbLf, " ")
+    s = Replace(s, vbCr, " ")
+
+    If Len(s) > 32000 Then s = Left$(s, 32000)
+    If Left$(s, 1) = "'" Then s = Mid$(s, 2)
+
+    cell.NumberFormat = "@"
+    cell.Value2 = "'" & s
+End Sub
+
+
+'============================================================
+' 読み方・定義ブロック（現状維持）
+'============================================================
+Private Function WriteReportGuideAndDefinitions(ByVal ws As Worksheet, ByVal startRow As Long) As Long
+    Dim r As Long
+    r = startRow
+
+    r = WriteSectionHeader(ws, r, "【このレポートの見方（最初にここだけ）】")
+    ws.Cells(r, 1).value = _
+        "1) 「計算負荷（メイン）」の『計算時間(秒)』『寄与率(%)』で、まず上位シートを特定します。"
+
+    ws.Cells(r + 1, 1).value = _
+        "2) 上位シートは「深掘り」ブロックで、揮発性/全列参照/重関数/巨大CFの" & _
+        "具体例（セル番地+式）を確認します。"
+
+    ws.Cells(r + 2, 1).value = _
+        "3) 改善の基本順：①全列参照を縮小 ②揮発性関数を排除 ③条件付き書式の適用範囲縮小 " & _
+        "④UsedRange圧縮 ⑤重関数の置換（中間表/PowerQuery等）"
+
+    ws.Range(ws.Cells(r, 1), ws.Cells(r + 2, 14)).WrapText = True
+    r = r + 4
+
+    r = WriteSectionHeader(ws, r, "【指標の定義（出力している数字は何か）】")
+    r = WriteDefinitionsTable(ws, r)
+
+    WriteReportGuideAndDefinitions = r + 1
+End Function
+
+Private Function WriteSectionHeader(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String) As Long
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = title
+        .Font.Bold = True
+        .Font.Size = 11
+        .Interior.Color = RGB(217, 225, 242)
+        .Font.Color = RGB(0, 0, 0)
+        .RowHeight = 20
+        .VerticalAlignment = xlVAlignCenter
+    End With
+    WriteSectionHeader = r + 1
+End Function
+
+Private Function WriteDefinitionsTable(ByVal ws As Worksheet, ByVal r As Long) As Long
+    ws.Cells(r, 1).value = "項目"
+    ws.Cells(r, 2).value = "列"
+    ws.Cells(r, 3).value = "単位"
+    ws.Cells(r, 4).value = "定義"
+    ws.Cells(r, 5).value = "読み取り/注意（改善の方向）"
+
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 5))
+        .Font.Bold = True
+        .Interior.Color = RGB(64, 64, 64)
+        .Font.Color = RGB(255, 255, 255)
+    End With
+
+    r = r + 1
+
+    AddDef ws, r, "計算時間(秒)", "B", "秒", _
+        "そのシートで「UsedRangeをDirty→ws.Calculate」を実行した所要時間（CALC_REPEAT回の平均）。", _
+        "『計算の重さへの寄与』は基本この値で判断。シート間依存で他シート計算が混ざる可能性はあるが、優先順位付けには有効。": r = r + 1
+
+    AddDef ws, r, "寄与率(%)", "C", "%", _
+        "各シート計算時間(秒) ÷ 全シート計算時間合計(秒)。", _
+        "『どのシートが全体の何%を占めるか』が一目で分かる。": r = r + 1
+
+    AddDef ws, r, "数式セル数", "D", "件", _
+        "UsedRange内で数式が入っているセル数。", _
+        "件数が多いほど計算が重くなりやすい（他の指標とセットで原因特定）。": r = r + 1
+
+    AddDef ws, r, "揮発性数", "E", "件", _
+        "数式内にINDIRECT/OFFSET/TODAY/NOW/RAND等（揮発性）を含むセル数。", _
+        "揮発性は再計算トリガになりやすい。可能なら非揮発の参照に置換。": r = r + 1
+
+    AddDef ws, r, "全列参照数", "F", "件", _
+        "数式内にA:A や 1:1 のような全列/全行参照が含まれるセル数。", _
+        "計算範囲を巨大化させやすい。テーブル化/実データ範囲参照に縮小。": r = r + 1
+
+    AddDef ws, r, "重関数数", "G", "件", _
+        "SUMPRODUCT/FILTER/XLOOKUP等、比較的高コストになりやすい関数を含むセル数。", _
+        "件数が多い場合は中間列/集計表/PowerQuery等への移行が効きやすい。": r = r + 1
+
+    AddDef ws, r, "UsedRange面積", "H", "セル", _
+        "UsedRows×UsedCols（UsedRangeの概算セル数）。", _
+        "過大だと保存/計算/書式が重い。最終セルが遠い場合は不要領域クリア→保存で圧縮。": r = r + 1
+
+    AddDef ws, r, "テーブル規模(セル)", "I", "セル", _
+        "ListObject（テーブル）の行数×列数の合計。", _
+        "巨大テーブル×数式/CFで重くなりやすい。必要列の削減/値化/分割を検討。": r = r + 1
+
+    AddDef ws, r, "ピボット数", "J", "個", _
+        "シート内PivotTableの個数。", _
+        "更新/キャッシュで重くなることがある。キャッシュ共有/更新設定見直し。": r = r + 1
+
+    AddDef ws, r, "CFルール数", "K", "個", _
+        "UsedRangeに対する条件付き書式ルール数（シート全体ではない）。", _
+        "全列適用などがあると描画が激重。適用範囲を必要範囲に縮小。": r = r + 1
+
+    AddDef ws, r, "図形数/チャート数", "L/M", "個", _
+        "Shapes / ChartObjects の数。", _
+        "多いと再描画や操作が重くなる。画像の圧縮/削減や分割を検討。": r = r + 1
+
+    With ws.Range(ws.Cells(r - 10, 1), ws.Cells(r - 1, 5))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(200, 200, 200)
+        .Columns(4).ColumnWidth = 55
+        .Columns(5).ColumnWidth = 55
+        .WrapText = True
+    End With
+
+    WriteDefinitionsTable = r
+End Function
+
+Private Sub AddDef(ByVal ws As Worksheet, ByVal r As Long, ByVal item As String, ByVal col As String, ByVal unit As String, ByVal defn As String, ByVal note As String)
+    ws.Cells(r, 1).value = item
+    ws.Cells(r, 2).value = col
+    ws.Cells(r, 3).value = unit
+    ws.Cells(r, 4).value = defn
+    ws.Cells(r, 5).value = note
+End Sub
+
+
+'============================================================
+' ダッシュボード
+'============================================================
+Private Function WriteDashboardMax(ByVal ws As Worksheet, ByVal startRow As Long, ByVal wbInfo As Object, ByVal sheets As Object, ByVal totalCalcSeconds As Double) As Long
+    Dim r As Long: r = startRow
+
+    r = WriteSectionHeaderMax(ws, r, "【ダッシュボード】まずここを見る")
+
+    Dim topSheet As String: topSheet = ""
+    Dim topSec As Double: topSec = -1#
+    Dim k As Variant
+    For Each k In sheets.keys
+        If CDbl(sheets(k)("CalcSeconds")) > topSec Then
+            topSec = CDbl(sheets(k)("CalcSeconds"))
+            topSheet = CStr(k)
+        End If
+    Next k
+    If topSec < 0 Then topSec = 0
+
+    Dim topPct As Double
+    If totalCalcSeconds > 0 Then topPct = 100# * topSec / totalCalcSeconds Else topPct = 0#
+
+    MakeCard ws, r, 1, 4, "全シート計算時間", FormatNumber(totalCalcSeconds, 3) & " 秒", "（合計）"
+    MakeCard ws, r, 5, 8, "最大寄与シート", topSheet, "寄与 " & FormatNumber(topPct, 1) & "% / " & FormatNumber(topSec, 3) & "秒"
+    MakeCard ws, r, 9, 11, "起動時間", FormatNumber(wbInfo("OpenSeconds"), 3) & " 秒", "読み取り専用で開いた実測"
+    MakeCard ws, r, 12, 14, "外部要因", _
+            "リンク " & CStr(wbInfo("LinkCount")) & " / 接続 " & CStr(wbInfo("ConnectionCount")), _
+            "Styles " & CStr(wbInfo("StyleCount")) & " / PivotCache " & CStr(wbInfo("PivotCacheCount"))
+
+    r = r + 3
+
+    ws.Cells(r, 1).value = "上位シート（寄与率Top5）"
+    ws.Cells(r, 1).Font.Bold = True
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 14)).Interior.Color = RGB(242, 242, 242)
+    r = r + 1
+
+    ws.Cells(r, 1).value = "順位"
+    ws.Cells(r, 2).value = "シート名"
+    ws.Cells(r, 3).value = "計算時間(秒)"
+    ws.Cells(r, 4).value = "寄与率(%)"
+    ws.Cells(r, 5).value = "寄与バー（■=5%）"
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 5)).Font.Bold = True
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 5)).Interior.Color = RGB(64, 64, 64)
+    ws.Range(ws.Cells(r, 1), ws.Cells(r, 5)).Font.Color = RGB(255, 255, 255)
+    r = r + 1
+
+    Dim top5 As Collection
+    Set top5 = GetTopSheetsByCalcTime(sheets, 5)
+
+    Dim i As Long
+    For i = 1 To top5.Count
+        Dim sName As String: sName = CStr(top5(i))
+        Dim sec As Double: sec = CDbl(sheets(sName)("CalcSeconds"))
+        Dim pct As Double: pct = CDbl(sheets(sName)("CalcSharePct"))
+
+        ws.Cells(r, 1).value = i
+        ws.Cells(r, 2).value = sName
+        ws.Cells(r, 3).value = sec
+        ws.Cells(r, 4).value = pct
+        ws.Cells(r, 5).value = PctBar(pct)
+
+        ws.Range(ws.Cells(r, 1), ws.Cells(r, 5)).Borders.LineStyle = xlContinuous
+        ws.Range(ws.Cells(r, 1), ws.Cells(r, 5)).Borders.Color = RGB(210, 210, 210)
+
+        r = r + 1
+    Next i
+
+    ws.Range(ws.Cells(r - top5.Count, 3), ws.Cells(r - 1, 3)).NumberFormat = "0.000"
+    ws.Range(ws.Cells(r - top5.Count, 4), ws.Cells(r - 1, 4)).NumberFormat = "0.0"
+
+    r = r + 2
+    WriteDashboardMax = r
+End Function
+
+Private Sub MakeCard(ByVal ws As Worksheet, ByVal topRow As Long, ByVal colL As Long, ByVal colR As Long, ByVal title As String, ByVal bigText As String, ByVal subText As String)
+    Dim rng As Range
+    Set rng = ws.Range(ws.Cells(topRow, colL), ws.Cells(topRow + 1, colR))
+    rng.Merge
+    rng.value = ""
+
+    With rng
+        .Interior.Color = RGB(255, 255, 255)
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(200, 200, 200)
+        .VerticalAlignment = xlVAlignCenter
+    End With
+
+    ws.Cells(topRow, colL).value = title
+    ws.Cells(topRow, colL).Font.Bold = True
+    ws.Cells(topRow, colL).Font.Size = 10
+    ws.Cells(topRow, colL).Font.Color = RGB(31, 56, 98)
+
+    ws.Cells(topRow, colL).Offset(1, 0).value = bigText
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Bold = True
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Size = 14
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Color = RGB(0, 0, 0)
+
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).value = subText
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).Font.Size = 9
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).Font.Color = RGB(100, 100, 100)
+End Sub
+
+Private Function PctBar(ByVal pct As Double) As String
+    Dim n As Long
+    n = CLng(Application.WorksheetFunction.Min(20, Application.WorksheetFunction.Max(0, Fix(pct / 5#))))
+    PctBar = Application.WorksheetFunction.Rept("■", n) & Application.WorksheetFunction.Rept("□", 20 - n)
+End Function
+
+Private Function WriteSectionHeaderMax(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String) As Long
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = title
+        .Font.Bold = True
+        .Font.Size = 11
+        .Interior.Color = RGB(217, 225, 242)
+        .RowHeight = 20
+        .VerticalAlignment = xlVAlignCenter
+    End With
+    WriteSectionHeaderMax = r + 1
+End Function
+
+
+'============================================================
+' メイン表：整形（現状維持）
+'============================================================
+Private Sub FormatMainTableMax(ByVal ws As Worksheet, ByVal headerRow As Long, ByVal firstRow As Long, ByVal lastRow As Long)
+    If lastRow < firstRow Then Exit Sub
+
+    ws.Columns("A").ColumnWidth = 22
+    ws.Columns("B").ColumnWidth = 12
+    ws.Columns("C").ColumnWidth = 10
+    ws.Columns("D").ColumnWidth = 12
+    ws.Columns("E").ColumnWidth = 10
+    ws.Columns("F").ColumnWidth = 10
+    ws.Columns("G").ColumnWidth = 10
+    ws.Columns("H").ColumnWidth = 14
+    ws.Columns("I").ColumnWidth = 16
+    ws.Columns("J").ColumnWidth = 10
+    ws.Columns("K").ColumnWidth = 10
+    ws.Columns("L").ColumnWidth = 9
+    ws.Columns("M").ColumnWidth = 9
+    ws.Columns("N").ColumnWidth = 70
+
+    Dim header As Range
+    Set header = ws.Range(ws.Cells(headerRow, 1), ws.Cells(headerRow, 14))
+
+    With header
+        .Interior.Color = RGB(45, 55, 72)
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .RowHeight = 20
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlVAlignCenter
+        .WrapText = True
+    End With
+
+    With ws.Range(ws.Cells(headerRow, 1), ws.Cells(lastRow, 14))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(226, 232, 240)
+    End With
+
+    Dim r As Long
+    For r = firstRow To lastRow
+        If (r - firstRow) Mod 2 = 0 Then
+            ws.Range(ws.Cells(r, 1), ws.Cells(r, 14)).Interior.Color = RGB(250, 250, 250)
+        Else
+            ws.Range(ws.Cells(r, 1), ws.Cells(r, 14)).Interior.Color = RGB(255, 255, 255)
+        End If
+    Next r
+
+    ws.Range(ws.Cells(firstRow, 2), ws.Cells(lastRow, 2)).NumberFormat = "0.000"
+    ws.Range(ws.Cells(firstRow, 3), ws.Cells(lastRow, 3)).NumberFormat = "0.0"
+    ws.Range(ws.Cells(firstRow, 4), ws.Cells(lastRow, 13)).NumberFormat = "#,##0"
+
+    ws.Range(ws.Cells(firstRow, 1), ws.Cells(lastRow, 1)).HorizontalAlignment = xlLeft
+    ws.Range(ws.Cells(firstRow, 2), ws.Cells(lastRow, 13)).HorizontalAlignment = xlRight
+    ws.Range(ws.Cells(firstRow, 14), ws.Cells(lastRow, 14)).HorizontalAlignment = xlLeft
+    ws.Range(ws.Cells(firstRow, 14), ws.Cells(lastRow, 14)).WrapText = True
+
+    Dim topN As Long: topN = 5
+    Dim endTop As Long: endTop = Application.WorksheetFunction.Min(lastRow, firstRow + topN - 1)
+    With ws.Range(ws.Cells(firstRow, 1), ws.Cells(endTop, 14))
+        .Font.Bold = True
+        .Interior.Color = RGB(235, 248, 255)
+    End With
+
+    For r = firstRow To lastRow
+        If CLng0(ws.Cells(r, 6).Value2) > 0 Then ws.Cells(r, 6).Interior.Color = RGB(255, 245, 238)
+        If CLng0(ws.Cells(r, 5).Value2) > 0 Then ws.Cells(r, 5).Interior.Color = RGB(255, 250, 240)
+        If CLng0(ws.Cells(r, 7).Value2) > 0 Then ws.Cells(r, 7).Interior.Color = RGB(255, 248, 220)
+
+        If CLng0(ws.Cells(r, 11).Value2) >= 200 Then ws.Cells(r, 11).Interior.Color = RGB(255, 235, 238)
+        If CLng0(ws.Cells(r, 8).Value2) >= 5000000 Then ws.Cells(r, 8).Interior.Color = RGB(240, 248, 255)
+    Next r
+
+    ApplyHeatBlue ws, ws.Range(ws.Cells(firstRow, 2), ws.Cells(lastRow, 2))
+    ApplyHeatBlue ws, ws.Range(ws.Cells(firstRow, 3), ws.Cells(lastRow, 3))
+
+    ws.Activate
+    ws.Cells(firstRow, 1).Select
+    ActiveWindow.FreezePanes = True
+End Sub
+
+Private Sub ApplyHeatBlue(ByVal ws As Worksheet, ByVal rng As Range)
+    Dim minV As Double, maxV As Double
+    minV = 1E+99: maxV = -1E+99
+
+    Dim cell As Range
+    For Each cell In rng.Cells
+        If IsNumeric(cell.Value2) Then
+            If cell.Value2 < minV Then minV = cell.Value2
+            If cell.Value2 > maxV Then maxV = cell.Value2
+        End If
+    Next cell
+    If maxV <= minV Then Exit Sub
+
+    Dim r0 As Long, g0 As Long, b0 As Long
+    Dim r1 As Long, g1 As Long, b1 As Long
+    r0 = 240: g0 = 248: b0 = 255
+    r1 = 191: g1 = 219: b1 = 254
+
+    For Each cell In rng.Cells
+        If IsNumeric(cell.Value2) Then
+            Dim x As Double
+            x = (cell.Value2 - minV) / (maxV - minV)
+
+            Dim rr As Long, gg As Long, bb As Long
+            rr = r0 + CLng((r1 - r0) * x)
+            gg = g0 + CLng((g1 - g0) * x)
+            bb = b0 + CLng((b1 - b0) * x)
+
+            cell.Interior.Color = RGB(rr, gg, bb)
+        End If
+    Next cell
+End Sub
+
+Private Function CLng0(ByVal v As Variant) As Long
+    On Error GoTo Fail
+    If IsNumeric(v) Then CLng0 = CLng(v) Else CLng0 = 0
+    Exit Function
+Fail:
+    CLng0 = 0
+End Function
+
+
+'============================================================
+' ジャンプリンク（現状維持）
+'============================================================
+Private Sub CreateJumpLinksMax(ByVal ws As Worksheet, ByVal mainHeaderRow As Long, ByVal deepDiveHeaderRow As Long, ByVal linksHeaderRow As Long, ByVal connHeaderRow As Long)
+    Dim baseRow As Long: baseRow = 4
+    Dim baseCol As Long: baseCol = 1
+
+    MakeJumpLink ws, baseRow, baseCol, "メイン表へ", mainHeaderRow
+    MakeJumpLink ws, baseRow, baseCol + 3, "深掘りへ", deepDiveHeaderRow
+    MakeJumpLink ws, baseRow, baseCol + 6, "外部リンクへ", linksHeaderRow
+    MakeJumpLink ws, baseRow, baseCol + 9, "接続へ", connHeaderRow
+End Sub
+
+Private Sub MakeJumpLink(ByVal ws As Worksheet, ByVal rowIndex As Long, ByVal colIndex As Long, ByVal text As String, ByVal targetRow As Long)
+    Dim btn As Range
+    Set btn = ws.Range(ws.Cells(rowIndex, colIndex), ws.Cells(rowIndex, colIndex + 2))
+    btn.Merge
+
+    With btn
+        .value = text
+        .Interior.Color = RGB(45, 55, 72)
+        .Font.Color = RGB(255, 255, 255)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlVAlignCenter
+        .RowHeight = 18
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(45, 55, 72)
+    End With
+
+    On Error Resume Next
+    ws.Hyperlinks.Add Anchor:=btn, Address:="", _
+        SubAddress:="'" & ws.name & "'!" & ws.Cells(targetRow, 1).Address, _
+        TextToDisplay:=text
+    On Error GoTo 0
+End Sub
+
+
+'============================================================
+' A4印刷用：印刷パック（現状維持）
+'============================================================
+Private Sub BuildPrintPackA4( _
+    ByVal src As Worksheet, _
+    ByVal mainHeaderRow As Long, _
+    ByVal mainFirstRow As Long, _
+    ByVal mainLastRow As Long, _
+    ByVal deepDiveHeaderRow As Long, _
+    ByVal linksHeaderRow As Long, _
+    ByVal connHeaderRow As Long, _
+    ByVal reportLastRow As Long)
+
+    Application.ScreenUpdating = False
+
+    Dim ws1 As Worksheet
+    Set ws1 = EnsureOrClearSheet(ThisWorkbook, "印刷_01_サマリー")
+
+    Dim summaryLast As Long
+    summaryLast = mainHeaderRow - 1
+    If summaryLast < 1 Then summaryLast = 1
+
+    CopyBlock src, ws1, 1, 1, 1, summaryLast, 14
+    ws1.Columns("A:N").AutoFit
+    ws1.Columns("N").ColumnWidth = 70
+    ws1.Rows("1:1").RowHeight = 28
+
+    Call SetupA4Print(ws1, xlPortrait, _
+                      "Excel計算負荷診断（サマリー）", _
+                      "Report / サマリー", _
+                      True, _
+                      1, 0)
+
+    Call AddPrintNarrative(ws1, summaryLast + 2)
+
+    Dim ws2 As Worksheet
+    Set ws2 = EnsureOrClearSheet(ThisWorkbook, "印刷_02_メイン表")
+
+    CopyBlock src, ws2, mainHeaderRow, 1, 1, (mainLastRow - mainHeaderRow + 1), 14
+    ApplyMainTablePrintWidths ws2
+
+    Call SetupA4Print(ws2, xlLandscape, _
+                      "Excel計算負荷診断（メイン表）", _
+                      "Report / メイン表", _
+                      False, _
+                      1, 0)
+
+    On Error Resume Next
+    ws2.PageSetup.PrintTitleRows = "$1:$1"
+    On Error GoTo 0
+
+    Dim ws3 As Worksheet
+    Set ws3 = EnsureOrClearSheet(ThisWorkbook, "印刷_03_深掘り")
+
+    Dim deepEnd As Long
+    deepEnd = linksHeaderRow - 1
+    If deepEnd < deepDiveHeaderRow Then deepEnd = deepDiveHeaderRow
+
+    CopyBlock src, ws3, deepDiveHeaderRow, 1, 1, (deepEnd - deepDiveHeaderRow + 1), 14
+    ws3.Columns("A:N").AutoFit
+    ws3.Columns("N").ColumnWidth = 70
+
+    Call SetupA4Print(ws3, xlPortrait, _
+                      "Excel計算負荷診断（深掘り）", _
+                      "Report / 深掘り", _
+                      False, _
+                      1, 0)
+
+    Dim ws4 As Worksheet
+    Set ws4 = EnsureOrClearSheet(ThisWorkbook, "印刷_04_外部リンク等")
+
+    CopyBlock src, ws4, linksHeaderRow, 1, 1, (reportLastRow - linksHeaderRow + 1), 14
+    ws4.Columns("A:N").AutoFit
+    ws4.Columns("N").ColumnWidth = 70
+
+    Call SetupA4Print(ws4, xlPortrait, _
+                      "Excel計算負荷診断（外部リンク等）", _
+                      "Report / 外部リンク・接続", _
+                      False, _
+                      1, 0)
+
+    Application.ScreenUpdating = True
+End Sub
+
+
+'============================================================
+' シート作成/初期化（エラーを出さない版）
+'============================================================
+Private Function EnsureOrClearSheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
+    Dim nm As String
+    nm = NormalizeSheetName(sheetName)
+
+    Dim ws As Worksheet
+    For Each ws In wb.Worksheets
+        If StrComp(ws.name, nm, vbBinaryCompare) = 0 Then
+            ws.Cells.Clear
+            Set EnsureOrClearSheet = ws
+            GoTo ApplyStyle
+        End If
+    Next ws
+
+    Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+
+    On Error Resume Next
+    ws.name = nm
+    If Err.Number <> 0 Then
+        Err.Clear
+        ws.name = MakeUniqueSheetName(wb, nm)
+    End If
+    On Error GoTo 0
+
+    ws.Cells.Clear
+    Set EnsureOrClearSheet = ws
+
+ApplyStyle:
+    With EnsureOrClearSheet
+        .Cells.Font.name = "Meiryo UI"
+        .Cells.Font.Size = 10
+        .Cells.VerticalAlignment = xlVAlignTop
+        .Cells.WrapText = False
+    End With
+End Function
+
+Private Function NormalizeSheetName(ByVal raw As String) As String
+    Dim s As String
+    s = Trim$(raw)
+    If Len(s) = 0 Then s = "Sheet"
+
+    s = Replace(s, ":", "_")
+    s = Replace(s, "\", "_")
+    s = Replace(s, "/", "_")
+    s = Replace(s, "?", "_")
+    s = Replace(s, "*", "_")
+    s = Replace(s, "[", "(")
+    s = Replace(s, "]", ")")
+
+    If Right$(s, 1) = "'" Then s = Left$(s, Len(s) - 1)
+    If Len(s) > 31 Then s = Left$(s, 31)
+
+    NormalizeSheetName = s
+End Function
+
+Private Function MakeUniqueSheetName(ByVal wb As Workbook, ByVal baseName As String) As String
+    Dim i As Long
+    Dim candidate As String
+
+    For i = 2 To 999
+        candidate = Left$(baseName, 28) & "_" & CStr(i)
+        If Not WorksheetExists(wb, candidate) Then
+            MakeUniqueSheetName = candidate
+            Exit Function
+        End If
+    Next i
+
+    MakeUniqueSheetName = Left$(baseName, 25) & "_999"
+End Function
+
+Private Function WorksheetExists(ByVal wb As Workbook, ByVal sheetName As String) As Boolean
+    Dim ws As Worksheet
+    For Each ws In wb.Worksheets
+        If StrComp(ws.name, sheetName, vbBinaryCompare) = 0 Then
+            WorksheetExists = True
+            Exit Function
+        End If
+    Next ws
+    WorksheetExists = False
+End Function
+
+
+'============================================================
+' 範囲コピー（値＋書式）
+'============================================================
+Private Sub CopyBlock( _
+    ByVal src As Worksheet, _
+    ByVal dst As Worksheet, _
+    ByVal srcTopRow As Long, _
+    ByVal srcLeftCol As Long, _
+    ByVal dstTopRow As Long, _
+    ByVal rowCount As Long, _
+    ByVal colCount As Long)
+
+    If rowCount <= 0 Or colCount <= 0 Then Exit Sub
+
+    Dim srcRng As Range, dstRng As Range
+    Set srcRng = src.Range(src.Cells(srcTopRow, srcLeftCol), src.Cells(srcTopRow + rowCount - 1, srcLeftCol + colCount - 1))
+    Set dstRng = dst.Range(dst.Cells(dstTopRow, 1), dst.Cells(dstTopRow + rowCount - 1, colCount))
+
+    srcRng.Copy
+    dstRng.PasteSpecial Paste:=xlPasteAll
+    Application.CutCopyMode = False
+End Sub
+
+
+'============================================================
+' メイン表用：印刷向け列幅
+'============================================================
+Private Sub ApplyMainTablePrintWidths(ByVal ws As Worksheet)
+    ws.Columns("A").ColumnWidth = 22
+    ws.Columns("B").ColumnWidth = 10
+    ws.Columns("C").ColumnWidth = 9
+    ws.Columns("D").ColumnWidth = 11
+    ws.Columns("E").ColumnWidth = 9
+    ws.Columns("F").ColumnWidth = 9
+    ws.Columns("G").ColumnWidth = 9
+    ws.Columns("H").ColumnWidth = 12
+    ws.Columns("I").ColumnWidth = 14
+    ws.Columns("J").ColumnWidth = 8
+    ws.Columns("K").ColumnWidth = 9
+    ws.Columns("L").ColumnWidth = 8
+    ws.Columns("M").ColumnWidth = 8
+    ws.Columns("N").ColumnWidth = 55
+
+    ws.Rows("1:1").RowHeight = 20
+    ws.Rows("1:1").Font.Bold = True
+    ws.Rows("1:1").WrapText = True
+End Sub
+
+
+'============================================================
+' A4印刷設定
+'============================================================
+Private Sub SetupA4Print( _
+    ByVal ws As Worksheet, _
+    ByVal orientation As XlPageOrientation, _
+    ByVal headerTitle As String, _
+    ByVal headerSub As String, _
+    ByVal isCover As Boolean, _
+    ByVal fitWide As Long, _
+    ByVal fitTall As Long)
+
+    With ws.PageSetup
+        .PaperSize = xlPaperA4
+        .orientation = orientation
+
+        .TopMargin = Application.InchesToPoints(0.5)
+        .BottomMargin = Application.InchesToPoints(0.5)
+        .LeftMargin = Application.InchesToPoints(0.5)
+        .RightMargin = Application.InchesToPoints(0.5)
+        .HeaderMargin = Application.InchesToPoints(0.3)
+        .FooterMargin = Application.InchesToPoints(0.3)
+
+        .LeftHeader = "&""Meiryo UI,Bold""&10 " & headerTitle
+        .CenterHeader = "&""Meiryo UI""&9 " & headerSub
+        .RightHeader = "&""Meiryo UI""&9 " & Format(Now, "yyyy/mm/dd HH:nn")
+
+        .LeftFooter = "&""Meiryo UI""&9 " & ThisWorkbook.name
+        .CenterFooter = ""
+        .RightFooter = "&""Meiryo UI""&9 " & "Page &P / &N"
+
+        .PrintGridlines = False
+        .PrintHeadings = False
+        .CenterHorizontally = False
+        .CenterVertically = False
+
+        .Zoom = False
+        .FitToPagesWide = fitWide
+        If fitTall <= 0 Then
+            .FitToPagesTall = False
+        Else
+            .FitToPagesTall = fitTall
+        End If
+    End With
+
+    Dim lastRow As Long, lastCol As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If lastCol < 1 Then lastCol = 1
+
+    ws.PageSetup.PrintArea = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Address
+End Sub
+
+
+'============================================================
+' 印刷サマリー補足
+'============================================================
+Private Sub AddPrintNarrative(ByVal ws As Worksheet, ByVal startRow As Long)
+    Dim r As Long: r = startRow
+
+    ws.Cells(r, 1).value = "【補足】計測方法と読み取りの注意"
+    ws.Cells(r, 1).Font.Bold = True
+    r = r + 1
+
+    ws.Cells(r, 1).value = "・計算時間(秒) は「そのシートのUsedRangeをDirty→ws.Calculate」を複数回測り平均した値です。"
+    r = r + 1
+    ws.Cells(r, 1).value = "・Excelの依存関係により、シート単位の計算が他シートの一部計算を含む場合があります。"
+    r = r + 1
+    ws.Cells(r, 1).value = "・したがって本レポートは「改善優先順位付け（どこから直すと効くか）」のための実務指標です。"
+    r = r + 2
+
+    ws.Cells(r, 1).value = "【改善の定番チェックリスト（上から順に効きやすい）】"
+    ws.Cells(r, 1).Font.Bold = True
+    r = r + 1
+    ws.Cells(r, 1).value = "1) 全列参照（A:A 等）を実データ範囲/テーブル参照へ縮小"
+    r = r + 1
+    ws.Cells(r, 1).value = "2) 揮発性関数（INDIRECT/OFFSET 等）を非揮発の参照へ置換"
+    r = r + 1
+    ws.Cells(r, 1).value = "3) 条件付き書式の適用範囲を必要範囲に限定（全列適用を避ける）"
+    r = r + 1
+    ws.Cells(r, 1).value = "4) UsedRange肥大を解消（不要領域クリア→保存で最終セルを戻す）"
+    r = r + 1
+    ws.Cells(r, 1).value = "5) 重関数（SUMPRODUCT/FILTER/XLOOKUP 等）の多用を中間表/PowerQuery 等へ移行"
+    r = r + 2
+
+    ws.Range(ws.Cells(startRow, 1), ws.Cells(r, 14)).WrapText = True
+End Sub
+
+'============================================================
+' 結論（最上段に出す）：初見でも30秒で理解できる要約
+'============================================================
+Private Function WriteExecutiveSummaryMax(ByVal ws As Worksheet, ByVal startRow As Long, ByVal wbInfo As Object, ByVal sheets As Object, ByVal totalCalcSeconds As Double) As Long
+    Dim r As Long: r = startRow
+
+    ' タイトルバー（結論）
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = "【結論】まずここ（重要ポイントと次のアクション）"
+        .Font.Bold = True
+        .Font.Size = 12
+        .Interior.Color = RGB(45, 55, 72)          'ダークグレー青
+        .Font.Color = RGB(255, 255, 255)
+        .RowHeight = 24
+        .VerticalAlignment = xlVAlignCenter
+    End With
+    r = r + 1
+
+    ' Top3シート（計算時間順）
+    Dim top3 As Collection
+    Set top3 = GetTopSheetsByCalcTime(sheets, 3)
+
+    Dim s1 As String, s2 As String, s3 As String
+    s1 = IIf(top3.Count >= 1, CStr(top3(1)), "")
+    s2 = IIf(top3.Count >= 2, CStr(top3(2)), "")
+    s3 = IIf(top3.Count >= 3, CStr(top3(3)), "")
+
+    Dim sec1 As Double, pct1 As Double
+    If Len(s1) > 0 Then
+        sec1 = CDbl(sheets(s1)("CalcSeconds"))
+        pct1 = CDbl(sheets(s1)("CalcSharePct"))
+    Else
+        sec1 = 0: pct1 = 0
+    End If
+
+    ' KPIカード（4枚）
+    MakeKpiCard ws, r, 1, 4, "全体の計算時間", FormatNumber(totalCalcSeconds, 3) & " 秒", "（全シート合計）"
+    MakeKpiCard ws, r, 5, 8, "最大寄与シート", IIf(Len(s1) > 0, s1, "―"), "寄与 " & FormatNumber(pct1, 1) & "% / " & FormatNumber(sec1, 3) & "秒"
+    MakeKpiCard ws, r, 9, 11, "起動時間", FormatNumber(wbInfo("OpenSeconds"), 3) & " 秒", "読み取り専用で開いた実測"
+    MakeKpiCard ws, r, 12, 14, "外部要因", "リンク " & CStr(wbInfo("LinkCount")) & " / 接続 " & CStr(wbInfo("ConnectionCount")), _
+                              "Styles " & CStr(wbInfo("StyleCount")) & " / PivotCache " & CStr(wbInfo("PivotCacheCount"))
+    r = r + 3
+
+    ' 一文結論（最重要）
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .Interior.Color = RGB(241, 245, 249)  '薄灰
+        .Font.Color = RGB(15, 23, 42)
+        .Font.Bold = True
+        .WrapText = True
+        .RowHeight = 34
+
+        Dim msg As String
+        msg = "最優先で直すべきは [" & s1 & "] です（寄与 " & FormatNumber(pct1, 1) & "%）。"
+        If Len(s2) > 0 Then msg = msg & " 次点は [" & s2 & "]。"
+        If Len(s3) > 0 Then msg = msg & " 3番手は [" & s3 & "]。"
+        msg = msg & " まずは上位シートから原因（全列参照/揮発性/重関数/CF/UsedRange）を潰すのが最短です。"
+        .value = msg
+    End With
+    r = r + 2
+
+    ' Top3表（初見が理解しやすい）
+    r = WriteMiniTableHeader(ws, r, "上位シート（計算時間Top3）")
+
+    ws.Cells(r, 1).value = "順位": ws.Cells(r, 2).value = "シート名"
+    ws.Cells(r, 3).value = "計算時間(秒)": ws.Cells(r, 4).value = "寄与率(%)"
+    ws.Cells(r, 5).value = "疑い：全列参照": ws.Cells(r, 6).value = "揮発性"
+    ws.Cells(r, 7).value = "重関数": ws.Cells(r, 8).value = "CFルール"
+    ws.Cells(r, 9).value = "UsedRange面積"
+    StyleMiniHeader ws, r, 1, 9
+    r = r + 1
+
+    Dim i As Long
+    For i = 1 To top3.Count
+        Dim sn As String: sn = CStr(top3(i))
+        ws.Cells(r, 1).value = i
+        ws.Cells(r, 2).value = sn
+        ws.Cells(r, 3).value = CDbl(sheets(sn)("CalcSeconds"))
+        ws.Cells(r, 4).value = CDbl(sheets(sn)("CalcSharePct"))
+        ws.Cells(r, 5).value = CLng(sheets(sn)("WholeColCells"))
+        ws.Cells(r, 6).value = CLng(sheets(sn)("VolatileCells"))
+        ws.Cells(r, 7).value = CLng(sheets(sn)("ExpensiveCells"))
+        ws.Cells(r, 8).value = CLng(sheets(sn)("CFRules"))
+        ws.Cells(r, 9).value = CLng(sheets(sn)("UsedArea"))
+
+        StyleMiniRow ws, r, 1, 9
+        r = r + 1
+    Next i
+
+    ws.Range(ws.Cells(r - top3.Count, 3), ws.Cells(r - 1, 3)).NumberFormat = "0.000"
+    ws.Range(ws.Cells(r - top3.Count, 4), ws.Cells(r - 1, 4)).NumberFormat = "0.0"
+    ws.Range(ws.Cells(r - top3.Count, 5), ws.Cells(r - 1, 9)).NumberFormat = "#,##0"
+
+    r = r + 1
+
+    ' 推奨アクション（テンプレ）
+    r = WriteMiniTableHeader(ws, r, "推奨アクション（最短で効く順）")
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r + 4, 14))
+        .Merge
+        .WrapText = True
+        .Interior.Color = RGB(255, 255, 255)
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(226, 232, 240)
+        .value = _
+            "1) 全列参照（A:A 等）を実データ範囲/テーブル参照へ縮小" & vbCrLf & _
+            "2) 揮発性関数（INDIRECT/OFFSET 等）を非揮発の参照へ置換" & vbCrLf & _
+            "3) 条件付き書式（全列適用など）の適用範囲を必要範囲に限定" & vbCrLf & _
+            "4) UsedRange肥大の解消（不要領域クリア→保存で最終セルを戻す）" & vbCrLf & _
+            "5) 重関数（SUMPRODUCT/FILTER/XLOOKUP 等）の多用を中間表/PowerQuery 等へ移行"
+    End With
+    r = r + 6
+
+    ' 色の凡例（初見の誤解防止）
+    r = WriteMiniTableHeader(ws, r, "凡例（色の意味）")
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = "薄橙=全列参照 / 薄黄=重関数 / 薄赤=CF多 / 薄青=UsedRange大 / 青グラデ=計算時間・寄与率（大きいほど濃い）"
+        .WrapText = True
+        .Interior.Color = RGB(248, 250, 252)
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(226, 232, 240)
+    End With
+    r = r + 2
+
+    WriteExecutiveSummaryMax = r
+End Function
+
+
+'============================================================
+' カード（KPI）
+'============================================================
+Private Sub MakeKpiCard(ByVal ws As Worksheet, ByVal topRow As Long, ByVal colL As Long, ByVal colR As Long, ByVal title As String, ByVal bigText As String, ByVal subText As String)
+    Dim rng As Range
+    Set rng = ws.Range(ws.Cells(topRow, colL), ws.Cells(topRow + 1, colR))
+    rng.Merge
+
+    With rng
+        .value = ""
+        .Interior.Color = RGB(255, 255, 255)
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(203, 213, 225)
+        .VerticalAlignment = xlVAlignCenter
+    End With
+
+    ws.Cells(topRow, colL).value = title
+    ws.Cells(topRow, colL).Font.Bold = True
+    ws.Cells(topRow, colL).Font.Size = 10
+    ws.Cells(topRow, colL).Font.Color = RGB(45, 55, 72)
+
+    ws.Cells(topRow, colL).Offset(1, 0).value = bigText
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Bold = True
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Size = 14
+    ws.Cells(topRow, colL).Offset(1, 0).Font.Color = RGB(15, 23, 42)
+
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).value = subText
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).Font.Size = 9
+    ws.Cells(topRow, colL).Offset(1, 0).Offset(0, 1).Font.Color = RGB(100, 116, 139)
+End Sub
+
+
+'============================================================
+' ミニ見出し（結論内の小見出し）
+'============================================================
+Private Function WriteMiniTableHeader(ByVal ws As Worksheet, ByVal r As Long, ByVal title As String) As Long
+    With ws.Range(ws.Cells(r, 1), ws.Cells(r, 14))
+        .Merge
+        .value = "■ " & title
+        .Font.Bold = True
+        .Interior.Color = RGB(226, 232, 240)
+        .Font.Color = RGB(15, 23, 42)
+        .RowHeight = 18
+        .VerticalAlignment = xlVAlignCenter
+    End With
+    WriteMiniTableHeader = r + 1
+End Function
+
+Private Sub StyleMiniHeader(ByVal ws As Worksheet, ByVal r As Long, ByVal c1 As Long, ByVal c2 As Long)
+    With ws.Range(ws.Cells(r, c1), ws.Cells(r, c2))
+        .Font.Bold = True
+        .Interior.Color = RGB(71, 85, 105)
+        .Font.Color = RGB(255, 255, 255)
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(203, 213, 225)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlVAlignCenter
+    End With
+End Sub
+
+Private Sub StyleMiniRow(ByVal ws As Worksheet, ByVal r As Long, ByVal c1 As Long, ByVal c2 As Long)
+    With ws.Range(ws.Cells(r, c1), ws.Cells(r, c2))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(226, 232, 240)
+    End With
+    ws.Range(ws.Cells(r, 3), ws.Cells(r, c2)).HorizontalAlignment = xlRight
+    ws.Cells(r, 2).HorizontalAlignment = xlLeft
+End Sub
+
+
+Private Sub ComputeValuePasteSizeReduction(ByVal wbOpen As Workbook, ByVal originalPath As String, ByVal sheets As Object, ByVal topN As Long)
+    Dim tempDir As String
+    tempDir = Environ$("TEMP")
+    If Len(tempDir) = 0 Then Exit Sub
+
+    Randomize
+
+    Dim ext As String
+    ext = GetFileExtWithDot(originalPath)
+
+    Dim baseFile As String
+    baseFile = tempDir & "\CalcDiag_Base_" & Format(Now, "yyyymmdd_hhnnss") & ext
+
+    On Error Resume Next
+    FileCopy originalPath, baseFile
+    If Err.Number <> 0 Then
+        Err.Clear
+        wbOpen.SaveCopyAs baseFile
+    End If
+    On Error GoTo 0
+
+    Dim baseSize As Double
+    baseSize = 0
+    On Error Resume Next
+    baseSize = FileLen(baseFile)
+    On Error GoTo 0
+    If baseSize <= 0 Then GoTo Cleanup
+
+    Dim targetSheets As Collection
+    Set targetSheets = New Collection
+
+    If topN <= 0 Then
+        Dim k As Variant
+        For Each k In sheets.keys
+            targetSheets.Add CStr(k)
+        Next k
+    Else
+        Dim topList As Collection
+        Set topList = GetTopSheetsByCalcTime(sheets, topN)
+
+        Dim i As Long
+        For i = 1 To topList.Count
+            targetSheets.Add CStr(topList(i))
+        Next i
+    End If
+
+    Dim vName As Variant
+    For Each vName In targetSheets
+        Dim sName As String
+        sName = CStr(vName)
+
+        Dim sm As Object
+        Set sm = sheets(sName)
+
+        If sm.Exists("FormulaCells") Then
+            If CDbl(sm("FormulaCells")) = 0 Then
+                sm("ValuePasteDeltaMB") = 0#
+                sm("ValuePasteDeltaPct") = 0#
+                GoTo NextSheet
+            End If
+        End If
+
+        Dim tmpFile As String
+        tmpFile = ""
+        tmpFile = tempDir & "\CalcDiag_" & SanitizeFileName(sName) & "_" & _
+                  Format(Now, "hhnnss") & "_" & CStr(Int(Rnd() * 100000)) & ext
+
+        On Error Resume Next
+        FileCopy baseFile, tmpFile
+        If Err.Number <> 0 Then
+            Err.Clear
+            GoTo NextSheet
+        End If
+        On Error GoTo 0
+
+        Dim twb As Workbook
+        Set twb = Nothing
+
+        On Error Resume Next
+        Set twb = Application.Workbooks.Open( _
+            Filename:=tmpFile, _
+            UpdateLinks:=0, _
+            ReadOnly:=False, _
+            AddToMru:=False, _
+            IgnoreReadOnlyRecommended:=True, _
+            Notify:=False)
+        If Err.Number <> 0 Then
+            Err.Clear
+            Set twb = Nothing
+        End If
+        On Error GoTo 0
+
+        If twb Is Nothing Then GoTo NextSheet
+
+        Application.Calculation = xlCalculationManual
+
+        Dim tws As Worksheet
+        Set tws = Nothing
+        On Error Resume Next
+        Set tws = twb.Worksheets(sName)
+        On Error GoTo 0
+
+        If Not tws Is Nothing Then
+            ConvertSheetFormulasToValues tws
+        End If
+
+        On Error Resume Next
+        twb.Save
+        twb.Close SaveChanges:=False
+        Set twb = Nothing
+        On Error GoTo 0
+
+        Dim sizeAfter As Double
+        sizeAfter = 0
+        On Error Resume Next
+        sizeAfter = FileLen(tmpFile)
+        On Error GoTo 0
+
+        Dim delta As Double
+        delta = baseSize - sizeAfter
+        If delta < 0 Then delta = 0
+
+        sm("ValuePasteDeltaMB") = delta / 1024# / 1024#
+        sm("ValuePasteDeltaPct") = 100# * delta / baseSize
+
+NextSheet:
+    ' 途中で開いたままの可能性があるので念のため閉じる
+    On Error Resume Next
+    If Not twb Is Nothing Then
+        twb.Close SaveChanges:=False
+    End If
+    Set twb = Nothing
+    On Error GoTo 0
+
+    SafeDeleteFile tmpFile
+Next vName
+
+
+Cleanup:
+    SafeDeleteFile baseFile
+End Sub
+
+
+
+
+' ファイル名に使えない文字を除去
+Private Function SanitizeFileName(ByVal s As String) As String
+    Dim t As String
+    t = s
+    t = Replace(t, "\", "_")
+    t = Replace(t, "/", "_")
+    t = Replace(t, ":", "_")
+    t = Replace(t, "*", "_")
+    t = Replace(t, "?", "_")
+    t = Replace(t, """", "_")
+    t = Replace(t, "<", "_")
+    t = Replace(t, ">", "_")
+    t = Replace(t, "|", "_")
+    If Len(t) > 60 Then t = Left$(t, 60)
+    SanitizeFileName = t
+End Function
+
+' 拡張子（.付き）を返す
+Private Function GetFileExtWithDot(ByVal path As String) As String
+    Dim p As Long
+    p = InStrRev(path, ".")
+    If p > 0 Then
+        GetFileExtWithDot = Mid$(path, p)
+    Else
+        GetFileExtWithDot = ".xlsx"
+    End If
+End Function
+
+' 指定シートの数式セルを値貼り（書式は維持）
+Private Sub ConvertSheetFormulasToValues(ByVal ws As Worksheet)
+    Dim fr As Range
+    Set fr = GetFormulaRangeSafe(ws)
+    If fr Is Nothing Then Exit Sub
+
+    Dim area As Range
+    For Each area In fr.Areas
+        ' 式→値（結果値に置換）
+        area.Value2 = area.Value2
+    Next area
+End Sub
+
+'============================================================
+' ファイルを安全に削除（存在しない場合でも落とさない）
+'============================================================
+Private Sub SafeDeleteFile(ByVal filePath As String)
+    On Error Resume Next
+    If Len(filePath) = 0 Then Exit Sub
+
+    ' Hidden/ReadOnly/System も拾えるように属性付きで確認
+    If Len(Dir$(filePath, vbNormal Or vbHidden Or vbSystem Or vbReadOnly)) = 0 Then Exit Sub
+
+    ' 読み取り専用だと消せないので正規化（失敗してもResume Next）
+    SetAttr filePath, vbNormal
+    Kill filePath
+End Sub
+
+
+
