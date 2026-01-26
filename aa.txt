@@ -1,8 +1,0 @@
-# 1) Base64テキストを読み込み（-Raw重要：途中改行で壊れにくくする）
-$b64 = Get-Content "C:\work\tool.b64" -Raw
-
-# 2) 復元
-[IO.File]::WriteAllBytes("C:\work\tool_restored.xlsm", [Convert]::FromBase64String($b64))
-
-# 3) ハッシュ検証（送る側と一致すれば同一ファイル）
-Get-FileHash "C:\work\tool_restored.xlsm" -Algorithm SHA256 | Format-List
