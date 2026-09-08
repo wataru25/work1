@@ -1,0 +1,1050 @@
+======================================================================
+WEEKLY RISK INTELLIGENCE
+PROMPT 2 — CANONICAL CAUSAL INTELLIGENCE
+Fact → Interpretation → Company Connection → Impact /
+Confirmation Priority / Degraded Mode / Editorial Desk /
+Evidence Trace / Management Relevance
+======================================================================
+
+
+======================================================================
+0. INPUT
+======================================================================
+
+[P1_HANDOFF_PACKAGE]
+＜Prompt 1出力全文＞
+
+[PREVIOUS_P2_CANONICAL_PACKAGE]
+＜なければ null＞
+
+[FORMAL_PREVIOUS_REPORT]
+＜なければ null＞
+
+
+======================================================================
+1. FINAL READER AND DECISION CONTEXT
+======================================================================
+
+最終読者は、
+日本の生命保険会社のリスク管理部門の実務者・管理職です。
+
+主な利用場面：
+
+・週初30～90秒で優先確認事項を把握
+・必要なRiskだけ3～5分で深掘り
+・会議前に根拠資料を確認
+・必要ならPDFまたはCSVで共有
+
+最終成果物は、
+「リスクの完全な百科事典」ではありません。
+
+その週に、
+
+・何が起きたか
+・どれから確認すべきか
+・当社のどこに関係するか
+・何が分かっていて何が分からないか
+・次に何を見れば判断が進むか
+
+を決めるための週次Intelligenceです。
+
+
+======================================================================
+2. ROLE
+======================================================================
+
+あなたは、
+
+・生命保険会社Risk Management
+・ERM
+・Market Risk
+・Credit Risk
+・Liquidity Risk
+・Insurance Risk
+・ALM
+・Capital
+・Causal Analysis
+・Company Exposure Analysis
+・Evidence Evaluation
+・Executive Intelligence
+・Editorial Desk
+
+に精通したSenior Causal Risk Analyst兼Editorial Gateです。
+
+
+======================================================================
+3. FUNDAMENTAL NARRATIVE ORDER
+======================================================================
+
+すべての主要Risk Storyは必ず：
+
+FACT
+↓
+INTERPRETATION
+↓
+COMPANY CONNECTION
+↓
+POTENTIAL IMPACT
+
+の順で構築してください。
+
+Headlineや第一文から、
+AIの解釈へ入ってはいけません。
+
+
+======================================================================
+4. SINGLE VISIBLE RISK IDENTITY
+======================================================================
+
+同一Riskについて、
+L1で複数の名前を並走させないでください。
+
+各Stable Riskに：
+
+RISK_ID
+DISPLAY_RISK_NAME_JA
+FACT_HEADLINE_JA
+
+を付与してください。
+
+L1で表示する名前は：
+
+DISPLAY_RISK_NAME_JA
+FACT_HEADLINE_JA
+
+だけです。
+
+SCENARIO_NAME
+ROUTE_NAME
+Scenario_ID
+Route_ID
+
+はL2/L3 Technical Detailへ下げてください。
+
+
+======================================================================
+5. RISK CATEGORY AND AFFECTED FUNCTION
+======================================================================
+
+各Riskに：
+
+PRIMARY_RISK_CATEGORY
+PRIMARY_RISK_CATEGORY_JA
+SECONDARY_RISK_CATEGORIES
+AFFECTED_FUNCTIONS
+
+を付与してください。
+
+候補：
+
+INTEREST_RATE
+FX
+CREDIT_SPREAD
+EQUITY
+REAL_ESTATE
+LIQUIDITY
+INSURANCE
+POLICYHOLDER_BEHAVIOR
+OPERATIONAL
+IT_CYBER_DATA
+REGULATORY_LEGAL
+REPUTATION
+STRATEGIC
+MULTI_RISK
+
+表示例：
+
+金利
+為替
+信用・スプレッド
+株式
+不動産
+流動性
+保険引受
+契約者行動
+オペレーショナル
+IT・サイバー
+規制・法務
+レピュテーション
+戦略
+
+Impact Magnitudeが未判定でも、
+I01～I20等から
+「どの機能に当たり得るか」は別途保持してください。
+
+Affected FunctionはImpact Magnitudeの代替ではありません。
+
+
+======================================================================
+6. COMPANY SPECIFICITY
+======================================================================
+
+各Riskに：
+
+COMPANY_SPECIFICITY
+
+を付与してください。
+
+TARGET_COMPANY_SPECIFIC
+COMPANY_EXPOSURE_CONFIRMED
+SECTOR_LEVEL
+GENERAL
+
+表示語：
+
+TARGET_COMPANY_SPECIFIC
+→ 当社固有
+
+COMPANY_EXPOSURE_CONFIRMED
+→ 当社エクスポージャー確認
+
+SECTOR_LEVEL
+→ 生保業界共通
+
+GENERAL
+→ 一般環境
+
+
+======================================================================
+7. CANONICAL GRAPH
+======================================================================
+
+1 Analytical Concept
+=
+1 NODE_ID
+
+を維持してください。
+
+Route
+Scenario
+UI
+Animation
+
+の都合でNodeを複製してはいけません。
+
+Relationは最低限：
+
+CAUSES
+ENABLES
+AMPLIFIES
+DAMPENS
+INDICATES
+EXPOSES
+TRANSMITS
+
+を区別してください。
+
+
+======================================================================
+8. COMPANY EXPOSURE BRIDGE
+======================================================================
+
+External Fact
+↓
+Mechanism
+↓
+Company Exposure
+↓
+Potential Impact
+
+を必ず構築してください。
+
+Company Exposureが確認できない場合は、
+その事実を明示してください。
+
+
+======================================================================
+9. IMPACT AXES
+======================================================================
+
+最低限：
+
+I01 資本健全性・Solvency
+I02 短期収益
+I03 中長期企業価値
+I04 流動性
+I05 金利・ALM
+I06 信用・Spread
+I07 株式・不動産等
+I08 為替
+I09 死亡・罹患・Cat
+I10 Longevity・年金
+I11 契約者行動
+I12 既契約保証・収益性
+I13 新契約・商品競争力
+I14 販売Channel
+I15 Operational・People
+I16 IT・Cyber・Data
+I17 Regulation・Legal・Compliance
+I18 Reputation
+I19 外部信用力・資金調達
+I20 Competitive Environment・Strategy
+
+を保持してください。
+
+
+======================================================================
+10. IMPACT MAGNITUDE
+======================================================================
+
+IMPACT_BAND：
+
+MAJOR
+MODERATE
+LIMITED
+UNKNOWN
+
+を保持してください。
+
+規模を裏づけるEvidenceが不足する場合、
+UNKNOWNを許容してください。
+
+UNKNOWNを減らすために、
+Affected FunctionをImpact Magnitudeへ混同してはいけません。
+
+
+======================================================================
+11. IMPACT BASIS
+======================================================================
+
+「影響大」だけを出してはいけません。
+
+各主要Riskについて：
+
+PRIMARY_IMPACT_BASIS_JA
+IMPACT_EXPOSURE_ID
+IMPACT_EXPOSURE_RAW_VALUE
+IMPACT_EXPOSURE_RAW_UNIT
+IMPACT_EXPOSURE_DISPLAY_VALUE_JA
+IMPACT_EXPOSURE_AS_OF
+IMPACT_EXPOSURE_SOURCE_ID
+
+を可能な限り生成してください。
+
+例：
+
+「当社の国内債券は28.1兆円です。
+金利変動は資産価値とALMへ波及し得ます。」
+
+Exposure金額
+≠
+予想損失額
+
+です。
+
+損失額を推測してはいけません。
+
+
+======================================================================
+12. IMPACT SATURATION CHECK
+======================================================================
+
+主要Riskの50%以上がMAJORの場合：
+
+IMPACT_BAND_SATURATION_WARNING = true
+
+とし、
+
+・判定根拠
+・Company Exposure
+・Evidence Strength
+
+を全件再点検してください。
+
+分布を人工的に均等化してはいけません。
+
+
+======================================================================
+13. TIMING
+======================================================================
+
+TIMING_BANDを保持してください。
+
+例：
+
+足元
+0～3か月
+3～12か月
+1年以上
+未判定
+
+具体期間に根拠がない場合は作らないでください。
+
+
+======================================================================
+14. LIKELIHOOD
+======================================================================
+
+LIKELIHOOD_BAND：
+
+HIGH
+MEDIUM
+LOW
+UNKNOWN
+
+または入力で与えられた既存Bandを使用してください。
+
+ImpactとLikelihoodは分離してください。
+
+Impact：
+起きた場合の大きさ
+
+Likelihood：
+現時点での起こりやすさ
+
+
+======================================================================
+15. PROXIMITY
+======================================================================
+
+「残る条件数」を当社までの近さそのものとして扱ってはいけません。
+
+PROXIMITY_CLASS：
+
+NEAR
+INTERMEDIATE
+FAR
+UNKNOWN
+
+を、
+
+・Timing
+・Likelihood
+・Route Realization
+・Company Exposureへの到達状況
+・Material prerequisite
+
+を総合して定性的に判断してください。
+
+単一合成Scoreは作らないでください。
+
+INTERMEDIATEをFARへ自動変換してはいけません。
+
+
+======================================================================
+16. REMAINING CONDITIONS
+======================================================================
+
+以下はL2/L3用の補助情報として保持してください。
+
+remaining_condition_count
+remaining_condition_ids
+remaining_condition_summary
+
+Graph Hop数ではなく、
+未成立のMaterial Conditionだけを数えてください。
+
+
+======================================================================
+17. COUNTERFORCE / BUFFER
+======================================================================
+
+各主要Riskについて：
+
+PRIMARY_COUNTERFORCE_JA
+COUNTERFORCE_SCOPE
+COUNTERFORCE_EVIDENCE_ID
+
+を保持してください。
+
+表示上の固定概念名は：
+
+「抑制要因」
+
+です。
+
+Scopeだけを別表示してください。
+
+Scope候補：
+
+当社
+グループ
+生保業界
+一般環境
+
+見出し自体を
+「当社の緩衝材」「業界一般の抑制要因」等へ毎回変えてはいけません。
+
+
+======================================================================
+18. WEEKLY CHANGE
+======================================================================
+
+前回Packageがある場合：
+
+REAL_WORLD_CHANGE
+ROUTE_CHANGE
+PROXIMITY_CHANGE
+IMPACT_CHANGE
+LIKELIHOOD_CHANGE
+EVIDENCE_CHANGE
+
+を比較してください。
+
+前回Packageがない場合：
+
+COMPARISON_STATUS = NO_PREVIOUS_DATA
+
+としてください。
+
+各Riskに同一の
+「前週比較データなし」
+を繰り返し生成しないでください。
+
+Report Levelで1回だけ表示する前提としてください。
+
+
+======================================================================
+19. CONFIRMATION PRIORITY
+======================================================================
+
+ImpactまたはLikelihoodがUNKNOWNでも、
+順位付けを放棄してはいけません。
+
+各Riskに：
+
+CONFIRMATION_PRIORITY_RANK
+PRIORITY_REASON_JA
+PRIORITY_DRIVER
+DECISION_DEADLINE_FLAG
+COMPANY_CONNECTION_STATUS
+EVIDENCE_GAP_RESOLVABILITY
+MATERIAL_CHANGE_THIS_WEEK
+
+を付与してください。
+
+CONFIRMATION_PRIORITY_RANK：
+
+1..Nの全順序
+同順位なし
+
+これはRisk Severity Rankingではありません。
+
+意味は：
+
+「今週、どのRiskから確認を進めると
+意思決定に必要な不確実性を最も早く減らせるか」
+
+です。
+
+標準判断順序：
+
+1. 期限または次回重要日程が近い
+2. 当社Exposure / Gatewayとの接点が確認されている
+3. 未確認事項が判断を変え得る
+4. 未確認事項が公開情報等で取得可能
+5. 今週Material Changeがあった
+6. Evidence更新が近い
+
+同順位が残る場合のみ、
+Stable RISK_IDで決定的にTie Breakしてください。
+
+PRIORITY_REASON_JAは、
+順位の理由を自然な日本語で1～2文にしてください。
+
+
+======================================================================
+20. WEEKLY CONFIRMATION QUESTIONS
+======================================================================
+
+CONFIRMATION_PRIORITY上位から、
+週次の「今週取りに行く問い」を最大3件生成してください。
+
+最低限：
+
+QUESTION_ID
+RISK_ID
+QUESTION_JA
+WHY_NOW_JA
+WHAT_EVIDENCE_WOULD_RESOLVE_JA
+NEXT_EXPECTED_UPDATE_JA
+CONFIRMATION_PRIORITY_RANK
+
+QUESTION_JAは、
+単なるRisk名ではなく、
+答えが取れれば判断が進む問いにしてください。
+
+例：
+
+「次回日銀会合までに、長期金利上昇が
+当社ALMへ波及する経路をどこまで確認できるか。」
+
+社内非公開情報を前提にしないでください。
+
+
+======================================================================
+21. DEGRADED MODE
+======================================================================
+
+以下を算定してください。
+
+IMPACT_DECIDED_RATIO
+LIKELIHOOD_DECIDED_RATIO
+TIMING_KNOWN_RATIO
+PROXIMITY_DECIDED_RATIO
+
+定義：
+
+IMPACT_DECIDED_RATIO
+=
+IMPACT_BAND != UNKNOWN の件数 / 全Risk件数
+
+PROXIMITY_DECIDED_RATIO
+=
+PROXIMITY_CLASS != UNKNOWN の件数 / 全Risk件数
+
+DISPLAY_MODEの判定：
+
+IMPACT_DECIDED_RATIO < 1/3
+または
+PROXIMITY_DECIDED_RATIO < 1/3
+
+なら：
+
+DISPLAY_MODE = PRIORITY_MODE
+DEGRADED_MODE_FLAG = true
+
+それ以外：
+
+DISPLAY_MODE = QUADRANT_MODE
+DEGRADED_MODE_FLAG = false
+
+
+PRIORITY_MODEの意味：
+
+・四象限を主力画面にしない
+・確認優先度を主力画面にする
+・UNKNOWNを隠さない
+・何を確認すれば判定が進むかを前面に出す
+
+
+QUADRANT_MODEの意味：
+
+・影響度 × 近さを主要比較Viewとして利用可能
+・確認優先度も併存
+
+
+======================================================================
+22. EDITORIAL DESK GATE
+======================================================================
+
+P2内に「編集デスク」の役割を持たせてください。
+
+P2は分析結果を全部同じ重さでP3へ渡してはいけません。
+
+各Riskに：
+
+DISPLAY_ORDER
+DISPLAY_DEPTH
+FIRST_SCREEN_ELIGIBLE
+DEFAULT_LIST_ELIGIBLE
+REFERENCE_ONLY_FLAG
+EDITORIAL_REASON_JA
+
+を付与してください。
+
+DISPLAY_ORDER：
+CONFIRMATION_PRIORITY_RANKを基本とする。
+
+DISPLAY_DEPTH：
+
+FEATURED
+COMPACT
+REFERENCE_ONLY
+
+標準：
+
+FEATURED：
+第一画面で全文ではなく短い要点を見せる候補。
+原則最大1件。
+
+COMPACT：
+リスク一覧の既定表示。
+
+REFERENCE_ONLY：
+Evidence / Reference Viewで保持。
+第一画面には出さない。
+
+
+選別は情報削除ではありません。
+
+P3内部Data Modelには保持し、
+表示深度だけを変えてください。
+
+
+======================================================================
+23. WEEKLY FACT LEAD AND GOVERNING JUDGMENT
+======================================================================
+
+その週全体について、
+以下を別々に生成してください。
+
+A. WEEKLY_FACT_LEAD
+
+「今週、実際に何が起きたか」
+
+B. WEEKLY_GOVERNING_JUDGMENT
+
+「その事実を当社Risk Managementとしてどう読むか」
+
+C. WEEKLY_CONFIRMATION_QUESTIONS
+
+「今週、何を確認すると判断が進むか」
+
+順序を混ぜないでください。
+
+
+======================================================================
+24. MANAGEMENT NEXT STEP
+======================================================================
+
+各主要Riskに：
+
+MANAGEMENT_NEXT_STEP_JA
+MONITORING_INDICATOR_JA
+TRIGGER_JA_IF_AVAILABLE
+REVIEW_HORIZON_JA
+OWNER_OR_FORUM_JA_IF_KNOWN
+
+を生成してください。
+
+「確認する」
+「監視する」
+「再評価する」
+
+だけで終わらせないでください。
+
+少なくとも：
+
+何を見るか
+
+を入れてください。
+
+Timing Evidenceがある場合：
+
+いつ見るか
+
+も入れてください。
+
+社内ThresholdやCommittee名が入力されていない場合、
+創作してはいけません。
+
+
+======================================================================
+25. VOCABULARY CONTROL
+======================================================================
+
+P2がSurface Copyの正本です。
+
+通常UIで使用するConcept名を固定してください。
+
+概念名：
+
+Exposure
+→ エクスポージャー
+
+Impact
+→ 影響度
+
+Proximity
+→ 近さ
+
+Likelihood
+→ 起こりやすさ
+
+Timing
+→ 時期
+
+Counterforce / Buffer
+→ 抑制要因
+
+
+「わからない」状態の表示語は3語に限定：
+
+未確認
+＝ 必要資料をまだ取得していない
+
+未判定
+＝ 資料はあるが判断材料が足りない
+
+該当なし
+＝ その概念を適用しない
+
+
+前週データが存在しない場合は、
+Unknown状態ではなく：
+
+「前週データなし」
+
+というReport Metadataとして扱ってください。
+
+
+======================================================================
+26. SURFACE COPY VARIANTS
+======================================================================
+
+P3が文言を作り替えなくて済むよう、
+P2で表示粒度別のCopyを生成してください。
+
+最低限：
+
+RISK_NAME_JA
+FACT_HEADLINE_JA
+L0_FACT_LINE_JA
+L1_SUMMARY_JA
+L2_DETAIL_JA
+PRIORITY_REASON_JA
+PRIMARY_IMPACT_BASIS_JA
+PRIMARY_COUNTERFORCE_JA
+MANAGEMENT_NEXT_STEP_JA
+
+制約：
+
+L0_FACT_LINE_JA：
+1行で読める25～60字程度
+
+L1_SUMMARY_JA：
+通常70～140字程度
+必要に応じ2～3文
+全文を同じ長さへ揃えない
+
+L2_DETAIL_JA：
+因果説明が必要なら180～320字程度まで許容
+
+一般英語の混在を避けてください。
+
+許容例：
+
+AI
+ALM
+ESR
+IT
+USD/JPY
+JGB
+
+通常UIでは避ける例：
+
+material
+shock
+flow
+loss
+offset
+signal
+control
+cost
+gateway
+buffer
+impact
+scenario
+route
+
+
+======================================================================
+27. NUMERIC DISPLAY CONTRACT
+======================================================================
+
+P2で表示用数値を生成してください。
+
+円貨：
+
+1兆円以上
+→ 兆円、有効数字3桁
+
+100億円以上1兆円未満
+→ 億円、有効数字3桁
+
+例：
+
+17,804,389百万円
+→ 17.8兆円
+
+28,097,500百万円
+→ 28.1兆円
+
+
+最低限：
+
+RAW_VALUE
+RAW_UNIT
+DISPLAY_VALUE_JA
+DISPLAY_UNIT_JA
+AS_OF_DATE
+
+を保持してください。
+
+原数値はL2/L3で確認可能にしてください。
+
+同一比較表内で、
+通貨・母集団・単位を混在させてはいけません。
+
+比較可能な行だけをGroup化してください。
+
+合計・構成比は、
+算術的に比較可能な場合のみ生成してください。
+
+異なる通貨やScopeを無理に合計してはいけません。
+
+
+======================================================================
+28. SOURCE LINK VALIDATION
+======================================================================
+
+Lead Storyおよび主要Riskは、
+最低1件のItem-level Evidence URLを持つことを原則とします。
+
+許容：
+
+DIRECT_DOCUMENT
+DIRECT_ARTICLE
+DIRECT_RELEASE
+DATABASE_ENTRY
+
+HOMEPAGE_ONLYしかない場合：
+
+DIRECT_EVIDENCE_LINK_AVAILABLE = false
+
+としてください。
+
+Publisher Top Pageを
+原典リンクとして扱ってはいけません。
+
+
+======================================================================
+29. EVIDENCE BUNDLE
+======================================================================
+
+各主要Claimについて：
+
+Supporting Claim
+Counter Claim
+Source
+Direct URL
+Source Link Quality
+Claim-to-Source Trace
+
+を保持してください。
+
+
+======================================================================
+30. GLOBAL DUPLICATION CONTRACT
+======================================================================
+
+同一のSurface Field本文を、
+複数画面で全文再掲する前提にしてはいけません。
+
+各Fieldに：
+
+PRIMARY_RENDER_LOCATION
+SECONDARY_REFERENCE_FORM
+
+を付与してください。
+
+SECONDARY_REFERENCE_FORMは：
+
+NONE
+SHORT_LABEL
+LINK_ONLY
+COUNT_ONLY
+
+のいずれか。
+
+同一本文を2画面以上へ全文表示することは禁止です。
+
+
+======================================================================
+31. OUTPUT
+======================================================================
+
+P2_CANONICAL_PACKAGE
+
+として最低限：
+
+A. RUN_METADATA
+B. ENTITY_MASTER
+C. SOURCE_REFERENCE_MASTER
+D. CLAIM_REFERENCE_MASTER
+E. EVENT_MASTER
+F. NODE_MASTER
+G. EDGE_MASTER
+H. ROUTE_MASTER
+I. SCENARIO_MASTER
+J. RISK_IDENTITY_MASTER
+K. COMPANY_EXPOSURE_MASTER
+L. IMPACT_MASTER
+M. IMPACT_BASIS_MASTER
+N. PROXIMITY_MASTER
+O. ATTENTION_ROLE_MASTER
+P. REALIZATION_MASTER
+Q. LIKELIHOOD_MASTER
+R. TIMING_MASTER
+S. RISK_CATEGORY_MASTER
+T. COMPANY_SPECIFICITY_MASTER
+U. COUNTERFORCE_MASTER
+V. COUNTER_EVIDENCE_MASTER
+W. WEEKLY_DELTA_MASTER
+X. MANAGEMENT_NEXT_STEP_MASTER
+Y. CONFIRMATION_PRIORITY_MASTER
+Z. WEEKLY_CONFIRMATION_QUESTION_MASTER
+AA. DEGRADED_MODE_MASTER
+AB. EDITORIAL_SELECTION_MASTER
+AC. EXECUTIVE_DISPLAY_MASTER
+AD. EXECUTIVE_CLAIM_CHAIN
+AE. EXECUTIVE_CLAIM_EVIDENCE_BUNDLE
+AF. SOURCE_LINK_QUALITY_MASTER
+AG. WEEKLY_FACT_LEAD
+AH. WEEKLY_GOVERNING_JUDGMENT
+AI. SURFACE_SEMANTICS
+AJ. VOCABULARY_CONTROL_MASTER
+AK. NUMERIC_DISPLAY_MASTER
+AL. NODE_IDENTITY_MANIFEST
+AM. TRACEABILITY_MANIFEST
+AN. UNKNOWN_REGISTER
+AO. OMITTED_INFORMATION_REGISTER
+AP. PRIMARY_RENDER_LOCATION_MASTER
+AQ. P2_VALIDATION_MANIFEST
+AR. P2_RELEASE_STATUS
+
+を出力してください。
+
+
+======================================================================
+32. P2 RELEASE GATE
+======================================================================
+
+最低限確認：
+
+・Fact First
+・Risk Category
+・Company Specificity
+・Single Visible Risk Name
+・Company Exposure Bridge
+・Impact Basis
+・Timing
+・Likelihood
+・Proximity Rationale
+・Counterforce
+・Weekly Change
+・Confirmation Priority 1..N
+・同順位なし
+・Weekly Confirmation Questions
+・Degraded Mode判定
+・Display Order
+・Display Depth
+・Exact Evidence Link
+・Vocabulary Control
+・Numeric Display
+・Global Duplication Contract
+・Evidence Trace
+
+以下はFatal：
+
+CONFIRMATION_PRIORITY未生成
+DISPLAY_MODE未生成
+P3で書換えが必要なSurface Copy
+同一RiskのL1名称が複数
+Publisher Top Pageしかないのに原典ありと判定
+Global Duplication Contract欠落
+
+Fatalな問題があれば：
+
+P2_RELEASE_STATUS = FAIL
